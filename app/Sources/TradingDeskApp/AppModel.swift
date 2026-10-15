@@ -43,10 +43,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastRefresh: Date?
 
     let client: APIClient
+    let supervisor: ServiceSupervisor
     private var refreshTask: Task<Void, Never>?
 
     init(client: APIClient = APIClient()) {
         self.client = client
+        self.supervisor = ServiceSupervisor(config: client.config)
     }
 
     var isConnectedToService: Bool { serviceError == nil && status != nil }
@@ -55,6 +57,10 @@ final class AppModel: ObservableObject {
         guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
+                // Arranca (o rearranca) el servicio local si no responde.
+                if let self, self.serviceError != nil || self.status == nil {
+                    await self.supervisor.ensureRunning()
+                }
                 await self?.refresh()
                 try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
             }

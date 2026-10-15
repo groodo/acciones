@@ -10,16 +10,19 @@ struct ConfiguracionView: View {
                 LabeledContent("Dirección", value: model.client.config.baseURL.absoluteString)
                 LabeledContent("Token", value: model.client.config.tokenPath.path)
                 LabeledContent("Estado", value: model.isConnectedToService ? "Conectado" : (model.serviceError ?? "Conectando…"))
+                LabeledContent("Arranque", value: model.supervisor.origin.label)
                 if let version = model.status?.serviceVersion {
                     LabeledContent("Versión del servicio", value: version)
                 }
                 Button("Probar conexión") { Task { await model.refresh() } }
             }
             SwiftUI.Section("Bróker") {
-                LabeledContent("Interactive Brokers", value: "Sin integrar (Hito B)")
+                LabeledContent("Interactive Brokers", value: model.status?.broker.capitalized ?? "—")
+                if let detail = model.status?.brokerDetail {
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
                 Text("La autenticación se hará siempre en IB Gateway oficial. La aplicación nunca pedirá ni guardará tu contraseña ni códigos 2FA.")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("Asistente de conexión IBKR") {}.disabled(true)
             }
             SwiftUI.Section("Modo de operativa") {
                 LabeledContent("Modo", value: "Paper (simulación)")

@@ -134,7 +134,12 @@ struct ServiceUnavailableView: View {
                 .frame(maxWidth: 520)
             Text("No se muestran saldos: sin servicio no hay datos actuales.")
                 .font(.callout)
-            Button("Reintentar") { Task { await model.refresh() } }
+            Button("Reintentar") {
+                Task {
+                    await model.supervisor.ensureRunning()
+                    await model.refresh()
+                }
+            }
         }
         .padding()
     }

@@ -10,7 +10,9 @@ Nada de este paso envía órdenes: las órdenes siguen siendo borradores simulad
    se introducen solo en IB Gateway; ni la app ni el servicio los ven.
 3. En *Configure → Settings → API → Settings*: marca «Enable ActiveX and Socket Clients», «Read-Only API» y
    «Allow connections from localhost only». El puerto Paper de IB Gateway es **4002**.
-4. Arranca el servicio con la fuente IBKR y abre la app como siempre:
+4. Abre `AI Trading Desk.app` (generada con `scripts/package_macos.sh`). La app arranca sola el servicio local con
+   la fuente IBKR y lo detiene al salir. Si ya hay un servicio escuchando en el puerto, lo usa y no lo toca, así que
+   también se puede seguir lanzando a mano:
 
    ```bash
    TRADINGDESK_DATA_SOURCE=ibkr scripts/run_service.sh
@@ -28,6 +30,10 @@ Variables opcionales: `TRADINGDESK_IB_PORT` (4002 por defecto; 7497 si usas TWS 
 - Sin IB Gateway, `/v1/account` y `/v1/positions` devuelven 503 con el motivo; la app muestra «Saldo no disponible»
   en lugar de cifras (INICIO-01) y el resto sigue funcionando.
 - La variación diaria de una posición solo se muestra si IBKR envía el cierre anterior; si no, aparece «—».
+
+- **Arranque automático**: el `.app` incluye un entorno Python (`Contents/Resources/service-runtime`) con el
+  servicio instalado. La app lo lanza si `/health` no responde, lo relanza si cae (como mucho cada 20 s) y lo para al
+  salir. Su salida va a `logs/service-stdout.log`. Con `swift run` usa `service/.venv` del repositorio.
 
 ## Garantías de seguridad
 

@@ -42,6 +42,8 @@ docs/       Notas del Hito A: decisiones técnicas y límites conocidos
    O ábrela en Xcode con `open app/Package.swift` y ejecuta el esquema `AITradingDesk`.
 
 3. Para generar `AI Trading Desk.app` (sin firmar): `scripts/package_macos.sh` (deja el resultado en `dist/`).
+   La app empaquetada arranca sola el servicio (con la cuenta Paper de IBKR) y lo detiene al salir, así que basta con
+   abrirla; los pasos 1 y 2 solo hacen falta para desarrollar.
 
 Para usar la cuenta Paper de IBKR en vez de datos simulados, abre IB Gateway (Paper, puerto 4002) y arranca
 el servicio con `TRADINGDESK_DATA_SOURCE=ibkr scripts/run_service.sh`. Detalles en [docs/hito-b.md](docs/hito-b.md).
