@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tradingdesk"
 version = "0.1.0"
-description = "Servicio local de AI Trading Desk (Hito A: datos simulados, solo Paper)"
+description = "Servicio local de AI Trading Desk (solo Paper: datos simulados o cuenta Paper de IBKR en solo lectura)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.115.6",
     "uvicorn==0.32.1",
+    "ib_async==2.1.0",
 ]
 
 [project.optional-dependencies]

@@ -13,8 +13,9 @@ _SECRET_PATTERNS = [
     re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),
     re.compile(r"((?:token|password|passwd|secret|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", re.IGNORECASE),
 ]
-# Identificadores de cuenta IBKR: U/DU + dígitos. Se enmascaran salvo los 3 últimos.
-_ACCOUNT_ID = re.compile(r"\b(D?U)(\d+)(\d{3})\b")
+# Identificadores de cuenta IBKR: U/DU (a veces con una letra más, p. ej. DUR) + dígitos.
+# Se enmascaran salvo los 3 últimos.
+_ACCOUNT_ID = re.compile(r"\b(D?U[A-Z]?)(\d+)(\d{3})\b")
 
 
 def redact(text: str) -> str:

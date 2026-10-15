@@ -33,8 +33,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var curve: EquityCurve?
     @Published private(set) var killSwitch: KillSwitchState?
     @Published var curveRange: String = "30d"
-    /// Todas las respuestas actuales vienen marcadas como simuladas por el servicio.
+    /// Verdadero si alguna de las respuestas mostradas está marcada como simulada por el servicio.
     @Published private(set) var isMock = true
+    /// Motivo por el que no hay saldo ni posiciones de IBKR (p. ej., IB Gateway cerrado).
+    @Published private(set) var accountUnavailable: String?
     @Published private(set) var notice: String?
     @Published private(set) var serviceError: String?
     @Published var actionMessage: String?
@@ -62,22 +64,37 @@ final class AppModel: ObservableObject {
     func refresh() async {
         do {
             async let statusEnv = client.status()
-            async let accountEnv = client.account()
-            async let positionsEnv = client.positions()
             async let signalsEnv = client.signals()
             async let ordersEnv = client.orders()
             async let killEnv = client.killSwitch()
             async let curveEnv = client.equityCurve(range: curveRange)
-            let (s, a, p, sg, o, k, c) = try await (statusEnv, accountEnv, positionsEnv, signalsEnv, ordersEnv, killEnv, curveEnv)
+            let (s, sg, o, k, c) = try await (statusEnv, signalsEnv, ordersEnv, killEnv, curveEnv)
+            var flags = [s.isMock, sg.isMock, o.isMock, k.isMock, c.isMock]
+            // Con IBKR, el servicio puede estar activo sin IB Gateway: entonces no hay saldo que mostrar,
+            // pero el resto de la app sigue funcionando.
+            do {
+                async let accountEnv = client.account()
+                async let positionsEnv = client.positions()
+                let (a, p) = try await (accountEnv, positionsEnv)
+                account = a.data
+                positions = p.data
+                flags += [a.isMock, p.isMock]
+                accountUnavailable = nil
+                notice = a.isMock ? a.notice
+                    : "Saldo y posiciones: cuenta Paper de IBKR. Señales, curva y órdenes: DATOS SIMULADOS."
+            } catch let error as APIError {
+                guard case .http(503, let detail) = error else { throw error }
+                account = nil
+                positions = []
+                accountUnavailable = detail
+                notice = sg.notice
+            }
             status = s.data
-            account = a.data
-            positions = p.data
             signals = sg.data
             orders = o.data
             killSwitch = k.data
             curve = c.data
-            isMock = [s.isMock, a.isMock, p.isMock, sg.isMock, o.isMock, k.isMock, c.isMock].contains(true)
-            notice = a.notice
+            isMock = flags.contains(true)
             serviceError = nil
             lastRefresh = Date()
         } catch {

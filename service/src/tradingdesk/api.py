@@ -1,7 +1,9 @@
 """API HTTP local (solo localhost, autenticada con token).
 
-No existe ningún endpoint que envíe órdenes a un bróker: en Hito A solo se
-pueden crear borradores simulados y cancelarlos.
+No existe ningún endpoint que envíe órdenes a un bróker: solo se pueden crear
+borradores simulados y cancelarlos. Con ``TRADINGDESK_DATA_SOURCE=ibkr`` el
+estado, la cuenta y las posiciones salen de la cuenta Paper de IBKR (solo
+lectura); señales, curva y órdenes siguen siendo simuladas y así se etiquetan.
 """
 
 from __future__ import annotations
@@ -14,11 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
 from .config import Settings
+from .broker import BrokerAdapter, IbkrPaperBroker
 from .db import Database
 from .domain import (
     AccountSnapshot,
@@ -65,7 +70,7 @@ def load_or_create_token(path: Path) -> str:
 
 
 def create_app(settings: Settings, *, token: str | None = None, provider: MockProvider | None = None,
-               db: Database | None = None) -> FastAPI:
+               db: Database | None = None, broker: BrokerAdapter | None = None) -> FastAPI:
     settings.validate()
     db = db or Database(settings.db_path)
     db.migrate()
@@ -74,14 +79,44 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     orders = OrderStore(db)
     kill_switch = KillSwitch(db)
     seed_mock_orders(orders, provider.now())
-    _record_snapshot(db, provider.account())
+    if broker is None and settings.data_source == "ibkr":
+        broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id)
+    if broker is None:
+        _record_snapshot(db, provider.account())
 
-    app = FastAPI(title="AI Trading Desk — servicio local", version=__version__, docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if broker is not None:
+            broker.start()
+        yield
+        if broker is not None:
+            broker.stop()
+
+    app = FastAPI(title="AI Trading Desk — servicio local", version=__version__, docs_url=None, redoc_url=None,
+                  lifespan=lifespan)
     app.state.db = db
+    app.state.broker = broker
 
     def envelope(data, notice: str = MOCK_NOTICE) -> Envelope:
         return Envelope(source="MOCK", is_mock=True, mode=settings.mode,
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
+
+    def ibkr_envelope(data, notice: str | None = None) -> Envelope:
+        return Envelope(source="IBKR", is_mock=False, mode=settings.mode,
+                        generated_at=datetime.now(timezone.utc), notice=notice, data=data)
+
+    def broker_snapshot():
+        snap = broker.snapshot()
+        if snap.link != "conectado" or snap.account is None:
+            raise HTTPException(503, snap.detail)
+        return snap
+
+    def quotes_notice(freshness: Freshness) -> str | None:
+        if freshness is Freshness.DELAYED:
+            return "Cotizaciones DIFERIDAS (unos 15 minutos): la cuenta no tiene suscripción de datos en tiempo real."
+        if freshness is Freshness.UNAVAILABLE:
+            return "Sin cotizaciones de mercado: los precios son los últimos que calcula IBKR para la cuenta."
+        return None
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -108,6 +143,23 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         now = datetime.now(timezone.utc)
         ks = kill_switch.active
         is_open = market_is_open(now)
+        market_detail = "Sesión regular 9:30–16:00 America/New_York (festivos no contemplados)"
+        if broker is not None:
+            snap = broker.snapshot()
+            alerts = ["Cuenta Paper de IBKR en solo lectura: no se envían órdenes al bróker.",
+                      "Señales, curva de patrimonio y órdenes siguen siendo SIMULADAS."]
+            if snap.link != "conectado":
+                alerts.insert(0, snap.detail)
+            elif snap.positions and (n := quotes_notice(snap.quotes)):
+                alerts.insert(0, n)
+            if ks:
+                alerts.append("Operativa detenida: no se aceptan nuevas entradas.")
+            return ibkr_envelope(SystemStatus(
+                broker=snap.link, broker_detail=snap.detail, mode=settings.mode, mode_label="PAPER",
+                market="abierto" if is_open else "cerrado", market_detail=market_detail, quotes=snap.quotes,
+                last_update=snap.updated_at or now, kill_switch_active=ks, trading_allowed=False,
+                alerts=alerts, service_version=__version__,
+            ))
         alerts = ["Cuenta Paper simulada: las operaciones no utilizan dinero real.",
                   "Sin conexión con IBKR en esta versión: los importes son de ejemplo."]
         if ks:
@@ -118,7 +170,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             mode=settings.mode,
             mode_label="SIMULACIÓN",
             market="abierto" if is_open else "cerrado",
-            market_detail="Sesión regular 9:30–16:00 America/New_York (festivos no contemplados)",
+            market_detail=market_detail,
             quotes=Freshness.SIMULATED,
             last_update=now,
             kill_switch_active=ks,
@@ -129,10 +181,16 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
 
     @app.get("/v1/account", response_model=Envelope[AccountSnapshot])
     def account():
+        if broker is not None:
+            snap = broker_snapshot()
+            return ibkr_envelope(snap.account, quotes_notice(snap.quotes) if snap.positions else None)
         return envelope(provider.account())
 
     @app.get("/v1/positions", response_model=Envelope[list[Position]])
     def positions():
+        if broker is not None:
+            snap = broker_snapshot()
+            return ibkr_envelope(snap.positions, quotes_notice(snap.quotes) if snap.positions else None)
         return envelope(provider.positions())
 
     @app.get("/v1/equity-curve", response_model=Envelope[EquityCurve])
@@ -179,6 +237,11 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             raise HTTPException(409, f"No se puede cancelar desde {order.state.value} en esta versión")
         return envelope(orders.transition(client_order_id, OrderState.CANCELLED, "Cancelada por el usuario"))
 
+    def current_positions() -> list[Position]:
+        if broker is None:
+            return provider.positions()
+        return broker.snapshot().positions
+
     def kill_switch_view() -> KillSwitchState:
         st = kill_switch.state()
         return KillSwitchState(
@@ -186,7 +249,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             reason=st["reason"],
             changed_at=datetime.fromisoformat(st["changed_at"]) if st["changed_at"] else None,
             open_orders=orders.list(mode=settings.mode, open_only=True),
-            open_positions=provider.positions(),
+            open_positions=current_positions(),
             message=("Operativa detenida. Se bloquean nuevas entradas; las órdenes y posiciones listadas "
                      "siguen activas y no se liquidan automáticamente.") if st["active"]
             else "Operativa habilitada en simulación.",

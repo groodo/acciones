@@ -104,7 +104,7 @@ public struct Position: Codable, Hashable, Identifiable, Sendable {
     public let avgPrice: Dec
     public let lastPrice: Dec
     public let unrealizedPnl: Money
-    public let changePct: Dec
+    public let changePct: Dec?
     public let stop: Dec?
     public let target: Dec?
     public let estimatedFee: Money?

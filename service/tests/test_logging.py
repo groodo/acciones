@@ -22,3 +22,8 @@ def test_json_formatter_redacts_fields(caplog):
     payload = json.loads(line)
     assert payload["msg"] == "conectado a U****543"
     assert "secreto-largo" not in line
+
+
+def test_paper_account_ids_with_letter_suffix_are_masked():
+    from tradingdesk.logging_setup import redact
+    assert redact("cuenta DUR272106") == "cuenta DUR***106"

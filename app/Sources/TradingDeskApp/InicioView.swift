@@ -14,6 +14,11 @@ struct InicioView: View {
                     LazyVGrid(columns: columns, spacing: 12) {
                         cards(account)
                     }
+                } else if let reason = model.accountUnavailable {
+                    Label("Saldo no disponible. \(reason)", systemImage: "exclamationmark.triangle")
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
                 }
                 EquityChartCard()
                 PositionsCard()
@@ -124,7 +129,7 @@ struct PositionsCard: View {
                     TableColumn("Precio medio") { p in Text(Fmt.money(p.avgPrice.value, currency: p.currency)) }
                     TableColumn("Precio actual") { p in Text(Fmt.money(p.lastPrice.value, currency: p.currency)) }
                     TableColumn("No realizado") { p in SignedAmount(money: p.unrealizedPnl, showDirection: false) }
-                    TableColumn("Variación") { p in Text(Fmt.signedPercent(p.changePct.value)) }
+                    TableColumn("Variación") { p in Text(p.changePct.map { Fmt.signedPercent($0.value) } ?? "—") }
                     TableColumn("Stop / objetivo") { p in
                         Text("\(p.stop.map { Fmt.number($0.value) } ?? "—") / \(p.target.map { Fmt.number($0.value) } ?? "—")")
                     }

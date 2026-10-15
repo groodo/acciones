@@ -11,7 +11,11 @@ def test_defaults_are_paper_mock_localhost(tmp_path):
 @pytest.mark.parametrize("env", [
     {"TRADINGDESK_MODE": "live"},
     {"TRADINGDESK_MODE": "real"},
-    {"TRADINGDESK_DATA_SOURCE": "ibkr"},
+    {"TRADINGDESK_DATA_SOURCE": "yahoo"},
+    {"TRADINGDESK_DATA_SOURCE": "ibkr", "TRADINGDESK_IB_PORT": "4001"},
+    {"TRADINGDESK_DATA_SOURCE": "ibkr", "TRADINGDESK_IB_PORT": "7496"},
+    {"TRADINGDESK_DATA_SOURCE": "ibkr", "TRADINGDESK_IB_HOST": "10.0.0.5"},
+    {"TRADINGDESK_DATA_SOURCE": "ibkr", "TRADINGDESK_MODE": "live"},
     {"TRADINGDESK_HOST": "0.0.0.0"},
     {"TRADINGDESK_HOST": "192.168.1.10"},
     {"TRADINGDESK_PORT": "80"},
@@ -24,3 +28,8 @@ def test_unsafe_configuration_is_rejected(tmp_path, env):
 
 def test_ipv6_loopback_allowed(tmp_path):
     assert Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_HOST": "::1"}).host == "::1"
+
+
+def test_ibkr_paper_defaults_to_gateway_paper_port(tmp_path):
+    s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr"})
+    assert (s.data_source, s.mode, s.ib_host, s.ib_port) == ("ibkr", "paper", "127.0.0.1", 4002)
