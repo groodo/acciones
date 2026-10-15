@@ -216,3 +216,4 @@ class SystemStatus(Model):
     trading_allowed: bool
     alerts: list[str]
     service_version: str
+    max_order_value: Money | None = None

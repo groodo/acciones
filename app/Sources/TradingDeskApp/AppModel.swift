@@ -149,13 +149,50 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Borrador para la hoja de nueva orden Paper (nil = cerrada).
+    @Published var paperOrderDraft: PaperOrderDraft?
+
+    var canSendPaperOrders: Bool { status?.tradingAllowed == true && status?.maxOrderValue != nil }
+
+    func openPaperOrder(symbol: String = "", side: String = "BUY", price: Decimal? = nil) {
+        paperOrderDraft = PaperOrderDraft(symbol: symbol, side: side, quantity: 1, limitPrice: price)
+    }
+
+    /// Envía la orden ya confirmada por el usuario. Devuelve nil si todo fue bien, o el motivo del rechazo.
+    func sendPaperOrder(_ draft: PaperOrderDraft) async -> String? {
+        guard let price = draft.limitPrice else { return "Indica un precio límite." }
+        do {
+            let order = try await client.createPaperOrder(PaperOrderRequest(
+                symbol: draft.symbol, side: draft.side, quantity: draft.quantity, limitPrice: price,
+                confirmed: true, clientOrderId: draft.clientOrderId
+            )).data
+            actionMessage = "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
+            paperOrderDraft = nil
+            await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func cancel(_ order: OrderRecord) async {
         do {
             _ = try await client.cancelOrder(order.clientOrderId)
-            actionMessage = "Orden \(order.clientOrderId) cancelada."
+            actionMessage = order.isMock ? "Orden \(order.clientOrderId) cancelada."
+                : "Cancelación de \(order.clientOrderId) pedida a IBKR. El estado se actualizará cuando IBKR la confirme."
             await refresh()
         } catch {
             actionMessage = error.localizedDescription
         }
     }
+}
+
+struct PaperOrderDraft: Identifiable, Equatable {
+    let id = UUID()
+    /// Fijo para toda la vida de la hoja: reintentar el envío no duplica la orden.
+    let clientOrderId = SimulatedOrderRequest.newClientOrderId()
+    var symbol: String
+    var side: String
+    var quantity: Int
+    var limitPrice: Decimal?
 }

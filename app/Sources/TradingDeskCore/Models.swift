@@ -251,6 +251,30 @@ public struct SystemStatus: Codable, Hashable, Sendable {
     public let tradingAllowed: Bool
     public let alerts: [String]
     public let serviceVersion: String
+    /// Tope de importe por orden Paper; solo existe cuando el envío de órdenes está habilitado.
+    public let maxOrderValue: Money?
+}
+
+/// Orden limitada para la cuenta Paper de IBKR. Solo se envía tras la confirmación del usuario.
+public struct PaperOrderRequest: Encodable, Sendable {
+    public let clientOrderId: String
+    public let symbol: String
+    public let side: String
+    public let quantity: String
+    public let limitPrice: String
+    public let currency: String
+    public let confirmed: Bool
+
+    public init(symbol: String, side: String, quantity: Int, limitPrice: Decimal, currency: String = "USD",
+                confirmed: Bool, clientOrderId: String = SimulatedOrderRequest.newClientOrderId()) {
+        self.clientOrderId = clientOrderId
+        self.symbol = symbol.uppercased()
+        self.side = side
+        self.quantity = String(quantity)
+        self.limitPrice = NSDecimalNumber(decimal: limitPrice).stringValue
+        self.currency = currency
+        self.confirmed = confirmed
+    }
 }
 
 public struct SimulatedOrderRequest: Encodable, Sendable {

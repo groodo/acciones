@@ -25,7 +25,12 @@ struct ConfiguracionView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modo de operativa") {
-                LabeledContent("Modo", value: "Paper (simulación)")
+                LabeledContent("Modo", value: "Paper (cuenta de práctica)")
+                if let cap = model.status?.maxOrderValue {
+                    LabeledContent("Órdenes Paper", value: "Habilitadas · tope \(Fmt.money(cap)) por orden")
+                } else {
+                    LabeledContent("Órdenes Paper", value: "No habilitadas")
+                }
                 Text("El modo real está bloqueado en el servicio: no existe proceso de habilitación en esta versión, y cambiar la interfaz o un archivo local no lo activa.")
                     .font(.caption).foregroundStyle(.secondary)
             }

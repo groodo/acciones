@@ -1,9 +1,10 @@
 """API HTTP local (solo localhost, autenticada con token).
 
-No existe ningún endpoint que envíe órdenes a un bróker: solo se pueden crear
-borradores simulados y cancelarlos. Con ``TRADINGDESK_DATA_SOURCE=ibkr`` el
-estado, la cuenta y las posiciones salen de la cuenta Paper de IBKR (solo
-lectura); señales, curva y órdenes siguen siendo simuladas y así se etiquetan.
+Con datos simulados solo se pueden crear borradores simulados y cancelarlos.
+Con ``TRADINGDESK_DATA_SOURCE=ibkr`` el estado, la cuenta y las posiciones salen
+de la cuenta Paper de IBKR y ``POST /v1/orders/paper`` envía órdenes limitadas a
+esa cuenta tras superar los controles de riesgo. No existe ninguna ruta hacia una
+cuenta real. Señales y curva siguen siendo simuladas y así se etiquetan.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from fastapi.responses import JSONResponse
 
 from . import __version__
 from .config import Settings
-from .broker import BrokerAdapter, IbkrPaperBroker
+from .broker import BrokerAdapter, BrokerUnavailable, IbkrPaperBroker
 from .db import Database
 from .domain import (
     AccountSnapshot,
@@ -32,6 +33,7 @@ from .domain import (
     Freshness,
     KillSwitchRequest,
     KillSwitchState,
+    Money,
     OrderEvent,
     OrderRecord,
     OrderState,
@@ -43,12 +45,14 @@ from .domain import (
 from .logging_setup import log_event
 from .mock_data import MOCK_NOTICE, MockProvider, seed_mock_orders
 from .orders import OrderError, OrderStore
+from .paper_orders import PaperOrderRequest, RiskRejection, check_order_limits, check_price_band
 from .safety import KillSwitch, market_is_open
 
 log = logging.getLogger("tradingdesk.api")
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
 CANCELLABLE = {OrderState.DRAFT, OrderState.RISK_APPROVED}
+BROKER_CANCELLABLE = {OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED}
 
 
 def load_or_create_token(path: Path) -> str:
@@ -80,7 +84,8 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     kill_switch = KillSwitch(db)
     seed_mock_orders(orders, provider.now())
     if broker is None and settings.data_source == "ibkr":
-        broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id)
+        broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id, orders=orders,
+                                 orders_enabled=settings.paper_orders)
     if broker is None:
         _record_snapshot(db, provider.account())
 
@@ -146,8 +151,13 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         market_detail = "Sesión regular 9:30–16:00 America/New_York (festivos no contemplados)"
         if broker is not None:
             snap = broker.snapshot()
-            alerts = ["Cuenta Paper de IBKR en solo lectura: no se envían órdenes al bróker.",
-                      "Señales, curva de patrimonio y órdenes siguen siendo SIMULADAS."]
+            if broker.orders_enabled:
+                alerts = [f"Órdenes Paper habilitadas: solo limitadas, con tu confirmación y un tope de "
+                          f"{settings.max_order_value} por orden. Dinero ficticio.",
+                          "Señales y curva de patrimonio siguen siendo SIMULADAS."]
+            else:
+                alerts = ["Cuenta Paper de IBKR en solo lectura: no se envían órdenes al bróker.",
+                          "Señales, curva de patrimonio y órdenes siguen siendo SIMULADAS."]
             if snap.link != "conectado":
                 alerts.insert(0, snap.detail)
             elif snap.positions and (n := quotes_notice(snap.quotes)):
@@ -157,8 +167,11 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             return ibkr_envelope(SystemStatus(
                 broker=snap.link, broker_detail=snap.detail, mode=settings.mode, mode_label="PAPER",
                 market="abierto" if is_open else "cerrado", market_detail=market_detail, quotes=snap.quotes,
-                last_update=snap.updated_at or now, kill_switch_active=ks, trading_allowed=False,
+                last_update=snap.updated_at or now, kill_switch_active=ks,
+                trading_allowed=broker.orders_enabled and snap.link == "conectado" and not ks,
                 alerts=alerts, service_version=__version__,
+                max_order_value=Money(amount=settings.max_order_value, currency="USD")
+                if broker.orders_enabled else None,
             ))
         alerts = ["Cuenta Paper simulada: las operaciones no utilizan dinero real.",
                   "Sin conexión con IBKR en esta versión: los importes son de ejemplo."]
@@ -228,11 +241,63 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         body = envelope(order).model_dump(mode="json")
         return JSONResponse(body, status_code=201 if created else 200)
 
+    @app.post("/v1/orders/paper", response_model=Envelope[OrderRecord], status_code=201)
+    def create_paper_order(req: PaperOrderRequest):
+        if broker is None or not broker.orders_enabled:
+            raise HTTPException(409, "El envío de órdenes Paper no está habilitado (hace falta la fuente IBKR).")
+        if kill_switch.active:
+            raise HTTPException(423, "Operativa detenida: no se aceptan nuevas entradas.")
+        existing = orders.get(req.client_order_id)
+        if existing is not None:
+            # Reintento de la misma petición: se devuelve la orden sin reenviarla.
+            same = (existing.symbol, existing.side, existing.quantity, existing.limit_price) == (
+                req.symbol, req.side, req.quantity, req.limit_price)
+            if not same or existing.is_mock:
+                raise HTTPException(409, "client_order_id ya usado con otros parámetros")
+            return JSONResponse(ibkr_envelope(existing).model_dump(mode="json"), status_code=200)
+        snap = broker_snapshot()
+        try:
+            check_order_limits(req, positions=snap.positions, max_order_value=settings.max_order_value)
+            check_price_band(req, broker.reference_price(req.symbol, req.currency))
+        except RiskRejection as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except BrokerUnavailable as exc:
+            raise HTTPException(503 if not str(exc).startswith("IBKR no reconoce") else 422, str(exc)) from exc
+        order, _ = orders.create_draft(
+            client_order_id=req.client_order_id, mode=settings.mode, is_mock=False, symbol=req.symbol,
+            side=req.side, quantity=req.quantity, limit_price=req.limit_price, currency=req.currency,
+            note="Orden limitada en la cuenta Paper de IBKR (dinero ficticio)",
+        )
+        orders.transition(order.client_order_id, OrderState.RISK_APPROVED,
+                          f"Controles superados: confirmada, importe ≤ {settings.max_order_value}, "
+                          "precio dentro del 5 % de la referencia")
+        log_event(log, "Orden Paper aprobada", client_order_id=order.client_order_id, symbol=req.symbol,
+                  side=req.side.value, quantity=str(req.quantity), limit=str(req.limit_price))
+        try:
+            broker.submit(order.client_order_id)
+        except Exception as exc:  # noqa: BLE001
+            current = orders.get(order.client_order_id)
+            if current.state is OrderState.RISK_APPROVED:
+                orders.transition(order.client_order_id, OrderState.CANCELLED, f"No se pudo enviar: {exc}")
+                raise HTTPException(503, f"No se pudo enviar la orden: {exc}") from exc
+            # Llegó a SUBMITTING: queda en UNKNOWN y se reconciliará; no se reenvía.
+        body = ibkr_envelope(orders.get(order.client_order_id)).model_dump(mode="json")
+        return JSONResponse(body, status_code=201)
+
     @app.post("/v1/orders/{client_order_id}/cancel", response_model=Envelope[OrderRecord])
     def cancel(client_order_id: str):
         order = orders.get(client_order_id)
         if order is None:
             raise HTTPException(404, "Orden no encontrada")
+        if not order.is_mock and order.state in BROKER_CANCELLABLE:
+            if broker is None or not broker.orders_enabled:
+                raise HTTPException(409, "Sin conexión de órdenes con IBKR")
+            try:
+                broker.cancel(client_order_id)
+            except BrokerUnavailable as exc:
+                raise HTTPException(503, str(exc)) from exc
+            # La confirmación de IBKR llega por su cuenta y moverá la orden a CANCELLED.
+            return JSONResponse(ibkr_envelope(order).model_dump(mode="json"), status_code=202)
         if order.state not in CANCELLABLE:
             raise HTTPException(409, f"No se puede cancelar desde {order.state.value} en esta versión")
         return envelope(orders.transition(client_order_id, OrderState.CANCELLED, "Cancelada por el usuario"))

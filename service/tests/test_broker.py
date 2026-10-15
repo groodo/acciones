@@ -108,13 +108,28 @@ def test_overall_freshness():
     assert overall_freshness([q(Freshness.REAL_TIME), q(Freshness.DELAYED)]) is Freshness.DELAYED
 
 
-def test_broker_module_cannot_send_orders():
-    tree = ast.parse(Path(broker_module.__file__).read_text(encoding="utf-8"))
-    called = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-    forbidden = {"placeOrder", "cancelOrder", "reqGlobalCancel", "bracketOrder", "oneCancelsAll", "whatIfOrder"}
-    assert not called & forbidden
-    connect = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "connectAsync")
-    assert any(k.arg == "readonly" and k.value.value is True for k in connect.keywords)
+def test_orders_only_go_out_through_submit_and_readonly_otherwise():
+    source = Path(broker_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    assert not {c.func.attr for c in calls} & {"reqGlobalCancel", "bracketOrder", "oneCancelsAll", "whatIfOrder"}
+    assert sum(c.func.attr == "placeOrder" for c in calls) == 1
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "IbkrPaperBroker")
+    submit = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "submit")
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(submit))
+    assert "is_paper_account(self._account" in ast.get_source_segment(source, submit)
+    connect = next(c for c in calls if c.func.attr == "connectAsync")
+    readonly = next(k for k in connect.keywords if k.arg == "readonly")
+    assert ast.unparse(readonly.value) == "not self.orders_enabled"
+
+
+def test_submit_refuses_when_orders_disabled():
+    b = broker_module.IbkrPaperBroker("127.0.0.1", 4002, 1)
+    assert b.orders_enabled is False
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.submit("UI-00000001")
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.reference_price("AAPL", "USD")  # sin conexión
 
 
 # --- API con un bróker falso ----------------------------------------------------------------------
@@ -126,6 +141,18 @@ class FakeBroker:
     started: bool = False
     stopped: bool = False
     calls: list = field(default_factory=list)
+    orders_enabled: bool = False
+    price: Decimal | None = Decimal("100")
+
+    def reference_price(self, symbol, currency):
+        self.calls.append(("price", symbol))
+        return self.price
+
+    def submit(self, client_order_id):
+        self.calls.append(("submit", client_order_id))
+
+    def cancel(self, client_order_id):
+        self.calls.append(("cancel", client_order_id))
 
     def snapshot(self):
         return self.snap

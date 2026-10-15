@@ -1,8 +1,8 @@
 """Máquina de estados de órdenes (PRD §7 OrderRecord) y su persistencia.
 
-En Hito A no existe ningún adaptador de bróker: el servicio solo puede crear
-borradores simulados y cancelarlos. Las transiciones posteriores existen para
-fijar desde ya las reglas (y sus tests) que usará Hito B.
+Las órdenes simuladas solo pasan por DRAFT/CANCELLED. Las órdenes Paper de IBKR
+recorren la máquina completa; sus cambios tras el envío los dicta el bróker
+(``paper_orders.sync_order``).
 """
 
 from __future__ import annotations
@@ -207,6 +207,21 @@ class OrderStore:
             _transition(conn, client_order_id, target, f"Llenado {filled_quantity}/{order.quantity}",
                         reconciling, (at or _now()).isoformat())
         return self.get(client_order_id)
+
+    def set_broker_ids(self, client_order_id: str, order_id: int | None, perm_id: int | None) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                """UPDATE orders SET ibkr_order_id = COALESCE(?, ibkr_order_id),
+                       ibkr_perm_id = COALESCE(?, ibkr_perm_id) WHERE client_order_id = ?""",
+                (order_id, perm_id, client_order_id),
+            )
+
+    def set_commission(self, client_order_id: str, commission: Money) -> None:
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE orders SET commission_amount = ?, commission_currency = ? WHERE client_order_id = ?",
+                (str(commission.amount), commission.currency, client_order_id),
+            )
 
 
 def _transition(conn, client_order_id: str, target: OrderState, reason: str,

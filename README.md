@@ -76,6 +76,7 @@ Cada respuesta va envuelta en `{source, is_mock, mode, generated_at, notice, dat
 | GET | `/v1/signals` | Tabla de oportunidades |
 | GET | `/v1/orders` | Órdenes (`?open_only=true` para abiertas) |
 | GET | `/v1/orders/{id}/events` | Cronología de estados de una orden |
+| POST | `/v1/orders/paper` | Orden limitada en la cuenta Paper de IBKR, tras controles de riesgo (solo fuente `ibkr`) |
 | POST | `/v1/orders/simulated` | Crea un borrador `DRAFT` simulado (idempotente por `client_order_id`) |
-| POST | `/v1/orders/{id}/cancel` | Cancela un borrador |
+| POST | `/v1/orders/{id}/cancel` | Cancela un borrador o pide a IBKR cancelar una orden Paper aceptada |
 | GET/POST | `/v1/kill-switch` | Consulta o activa «Detener operativa» |

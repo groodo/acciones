@@ -12,6 +12,7 @@ import ipaddress
 import os
 import platform
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 ALLOWED_MODES = frozenset({"paper"})
@@ -43,6 +44,9 @@ class Settings:
     ib_host: str = "127.0.0.1"
     ib_port: int = IB_PAPER_GATEWAY_PORT
     ib_client_id: int = 17
+    # Envío de órdenes limitadas a la cuenta Paper (solo con data_source="ibkr").
+    paper_orders: bool = True
+    max_order_value: Decimal = Decimal("1000")
 
     @property
     def db_path(self) -> Path:
@@ -67,6 +71,8 @@ class Settings:
         if self.ib_port in IB_LIVE_PORTS:
             raise ConfigError(f"El puerto {self.ib_port} es el de cuenta real de IBKR. Usa el de Paper "
                               f"({IB_PAPER_GATEWAY_PORT} en IB Gateway o 7497 en TWS).")
+        if not (Decimal("0") < self.max_order_value <= Decimal("100000")):
+            raise ConfigError("TRADINGDESK_MAX_ORDER_VALUE debe estar entre 0 y 100000.")
         if not _is_loopback(self.ib_host):
             raise ConfigError(f"IB Gateway debe estar en este Mac; '{self.ib_host}' no es una dirección local.")
         if not _is_loopback(self.host):
@@ -94,7 +100,16 @@ class Settings:
             ib_host=env.get("TRADINGDESK_IB_HOST", "127.0.0.1"),
             ib_port=number("TRADINGDESK_IB_PORT", IB_PAPER_GATEWAY_PORT),
             ib_client_id=number("TRADINGDESK_IB_CLIENT_ID", 17),
+            paper_orders=env.get("TRADINGDESK_PAPER_ORDERS", "1").lower() not in ("0", "false", "no"),
+            max_order_value=_decimal(env.get("TRADINGDESK_MAX_ORDER_VALUE", "1000")),
         ).validate()
+
+
+def _decimal(text: str) -> Decimal:
+    try:
+        return Decimal(text)
+    except InvalidOperation as exc:
+        raise ConfigError(f"Importe no válido: {text}") from exc
 
 
 def _is_loopback(host: str) -> bool:

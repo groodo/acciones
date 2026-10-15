@@ -1,10 +1,11 @@
-"""Conexión de SOLO LECTURA con IB Gateway (cuenta Paper).
+"""Conexión con IB Gateway (solo cuenta Paper).
 
-Hito B, primera parte: se leen saldo, posiciones y cotizaciones de la cuenta
-Paper a través de la TWS API oficial (biblioteca ``ib_async``). Este módulo no
-contiene ninguna llamada capaz de crear, modificar o cancelar órdenes, y la
-conexión se abre con ``readonly=True``. Si la cuenta conectada no es Paper
-(los identificadores Paper empiezan por ``DU``), se desconecta y no reintenta.
+Se leen saldo, posiciones y cotizaciones de la cuenta Paper a través de la TWS
+API oficial (biblioteca ``ib_async``) y, si está habilitado, se envían y cancelan
+órdenes limitadas en esa cuenta. Sin envío habilitado la conexión es
+``readonly=True``. Si la cuenta conectada no es Paper (los identificadores Paper
+empiezan por ``DU``), se desconecta y no reintenta; además se comprueba otra vez
+antes de cada envío.
 
 La API de IB es asíncrona; se ejecuta en un hilo propio con su bucle de eventos
 y publica instantáneas inmutables que la API HTTP lee sin bloquear.
@@ -21,8 +22,10 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Iterable, Literal, Protocol
 
-from .domain import AccountSnapshot, Freshness, FxRate, Money, Position
+from .domain import AccountSnapshot, Freshness, FxRate, Money, OrderState, Position
 from .logging_setup import log_event
+from .orders import OrderStore
+from .paper_orders import BrokerOrderStatus, mark_missing_as_unknown, sync_order
 
 log = logging.getLogger("tradingdesk.broker")
 # ib_async registra cada intento fallido como ERROR; ya lo resume nuestro aviso de reconexión.
@@ -39,6 +42,14 @@ BrokerLink = Literal["conectado", "desconectado", "reconectando"]
 
 class NotPaperAccountError(RuntimeError):
     """La sesión de IB Gateway no es de una cuenta Paper."""
+
+
+class BrokerUnavailable(RuntimeError):
+    """No se puede hablar con IBKR ahora mismo (desconectado, envío desactivado, orden no lista)."""
+
+
+class UnknownSymbol(BrokerUnavailable):
+    """IBKR no reconoce el símbolo."""
 
 
 def is_paper_account(account_id: str) -> bool:
@@ -87,9 +98,14 @@ class BrokerSnapshot:
 
 
 class BrokerAdapter(Protocol):
+    orders_enabled: bool
+
     def snapshot(self) -> BrokerSnapshot: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
+    def reference_price(self, symbol: str, currency: str) -> Decimal | None: ...
+    def submit(self, client_order_id: str) -> None: ...
+    def cancel(self, client_order_id: str) -> None: ...
 
 
 # --- Conversión de datos de IB a los contratos del PRD ------------------------------------------
@@ -215,14 +231,25 @@ def overall_freshness(quotes: Iterable[Quote]) -> Freshness:
 
 
 class IbkrPaperBroker:
-    """Mantiene una conexión de solo lectura con IB Gateway Paper en un hilo propio."""
+    """Mantiene la conexión con IB Gateway Paper en un hilo propio.
 
-    def __init__(self, host: str, port: int, client_id: int):
+    Con ``orders_enabled=False`` la conexión es de solo lectura (``readonly=True``) y cualquier intento de
+    enviar una orden falla antes de llegar a IBKR.
+    """
+
+    def __init__(self, host: str, port: int, client_id: int, *, orders: OrderStore | None = None,
+                 orders_enabled: bool = False):
         self.host, self.port, self.client_id = host, port, client_id
+        self.orders = orders
+        self.orders_enabled = orders_enabled and orders is not None
         self._lock = threading.Lock()
         self._snapshot = BrokerSnapshot(link="desconectado", detail="Conectando con IB Gateway…")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ib = None
+        self._account: str | None = None
+        self._errors: dict[int, str] = {}
 
     def snapshot(self) -> BrokerSnapshot:
         with self._lock:
@@ -242,6 +269,79 @@ class IbkrPaperBroker:
         if self._thread is not None:
             self._thread.join(timeout=5)
 
+    # --- Órdenes (llamadas desde los hilos de la API HTTP) ------------------------------------------
+
+    def _call(self, coro_factory, timeout: float = 15):
+        loop, ib = self._loop, self._ib
+        if loop is None or ib is None or not ib.isConnected() or self._account is None:
+            raise BrokerUnavailable("IB Gateway no está conectado.")
+        return asyncio.run_coroutine_threadsafe(coro_factory(ib), loop).result(timeout=timeout)
+
+    def reference_price(self, symbol: str, currency: str) -> Decimal | None:
+        """Último precio (o cierre anterior) del símbolo según IBKR, para validar el precio límite."""
+        async def run(ib):
+            contract = await self._qualify(ib, symbol, currency)
+            ticker = ib.reqMktData(contract, "", False, False)
+            try:
+                for _ in range(30):
+                    price = to_decimal(ticker.marketPrice()) or to_decimal(ticker.close)
+                    if price:
+                        return price
+                    await asyncio.sleep(0.1)
+                return None
+            finally:
+                ib.cancelMktData(contract)
+        return self._call(run)
+
+    def submit(self, client_order_id: str) -> None:
+        """Envía a IBKR Paper una orden ya aprobada por riesgo (RISK_APPROVED → SUBMITTING)."""
+        if not self.orders_enabled:
+            raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
+
+        async def run(ib):
+            from ib_async import LimitOrder
+
+            if not is_paper_account(self._account or ""):
+                raise NotPaperAccountError("La cuenta conectada no es Paper.")
+            order = self.orders.get(client_order_id)
+            if order is None or order.is_mock or order.mode != "paper" or order.state is not OrderState.RISK_APPROVED:
+                raise BrokerUnavailable("La orden no está lista para enviarse.")
+            contract = await self._qualify(ib, order.symbol, order.currency)
+            ib_order = LimitOrder(order.side.value, float(order.quantity), float(order.limit_price),
+                                  account=self._account, orderRef=client_order_id, tif="DAY")
+            self.orders.transition(client_order_id, OrderState.SUBMITTING, "Enviando a IBKR Paper")
+            try:
+                trade = ib.placeOrder(contract, ib_order)
+            except Exception as exc:
+                # No sabemos si llegó: UNKNOWN y nunca se reenvía sola.
+                self.orders.transition(client_order_id, OrderState.UNKNOWN, f"Error al enviar: {exc}")
+                raise
+            self.orders.set_broker_ids(client_order_id, trade.order.orderId, trade.order.permId or None)
+            log_event(log, "Orden Paper enviada", client_order_id=client_order_id, order_id=trade.order.orderId)
+        self._call(run)
+
+    def cancel(self, client_order_id: str) -> None:
+        if not self.orders_enabled:
+            raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
+
+        async def run(ib):
+            for trade in ib.openTrades():
+                if trade.order.orderRef == client_order_id:
+                    ib.cancelOrder(trade.order)
+                    return
+            raise BrokerUnavailable("IBKR no tiene esa orden abierta.")
+        self._call(run)
+
+    async def _qualify(self, ib, symbol: str, currency: str):
+        from ib_async import Stock
+
+        contracts = await ib.qualifyContractsAsync(Stock(symbol, "SMART", currency))
+        if not contracts or contracts[0] is None or not contracts[0].conId:
+            raise UnknownSymbol(f"IBKR no reconoce la acción {symbol} en {currency}.")
+        return contracts[0]
+
+    # --- Bucle de conexión ---------------------------------------------------------------------------
+
     def _run(self) -> None:
         asyncio.run(self._main())
 
@@ -249,19 +349,28 @@ class IbkrPaperBroker:
         from ib_async import IB
         from ib_async.ib import StartupFetch
 
+        self._loop = asyncio.get_running_loop()
+        fetch = StartupFetch.POSITIONS | StartupFetch.ACCOUNT_UPDATES
+        if self.orders_enabled:
+            fetch |= StartupFetch.ORDERS_OPEN | StartupFetch.ORDERS_COMPLETE | StartupFetch.EXECUTIONS
         attempt = 0
         while not self._stop.is_set():
             ib = IB()
             try:
-                await ib.connectAsync(self.host, self.port, clientId=self.client_id, readonly=True, timeout=8,
-                                      fetchFields=StartupFetch.POSITIONS | StartupFetch.ACCOUNT_UPDATES)
+                await ib.connectAsync(self.host, self.port, clientId=self.client_id,
+                                      readonly=not self.orders_enabled, timeout=8, fetchFields=fetch)
                 accounts = ib.managedAccounts()
                 if not accounts or not all(is_paper_account(a) for a in accounts):
                     raise NotPaperAccountError(
                         "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: esta versión solo "
-                        "admite Paper. Inicia sesión en IB Gateway eligiendo «Paper Trading».")
+                        "admite Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
                 attempt = 0
-                log_event(log, "Conectado a IB Gateway (solo lectura)", port=self.port, account=accounts[0])
+                self._account = accounts[0]
+                if self.orders_enabled:
+                    self._watch_orders(ib)
+                self._ib = ib
+                log_event(log, "Conectado a IB Gateway", port=self.port, account=accounts[0],
+                          orders=self.orders_enabled)
                 await self._poll(ib, accounts[0])
             except NotPaperAccountError as exc:
                 log_event(log, "Cuenta no Paper: conexión rechazada", logging.ERROR)
@@ -274,11 +383,59 @@ class IbkrPaperBroker:
                           "abierto, con la sesión Paper iniciada y la API activada.")
                 self._publish(BrokerSnapshot(link="reconectando" if attempt else "desconectado", detail=detail))
             finally:
+                self._ib = None
+                self._account = None
                 if ib.isConnected():
                     ib.disconnect()
             delay = RECONNECT_SECONDS[min(attempt, len(RECONNECT_SECONDS) - 1)]
             attempt += 1
             await asyncio.sleep(delay)
+
+    def _watch_orders(self, ib) -> None:
+        def on_error(req_id, code, message, *_args):
+            if req_id and req_id > 0:
+                self._errors[req_id] = f"{code}: {message}"
+
+        def on_trade(trade, *_args):
+            self._sync_trade(trade)
+
+        ib.errorEvent += on_error
+        ib.orderStatusEvent += on_trade
+        ib.execDetailsEvent += on_trade
+        ib.commissionReportEvent += on_trade
+        # Reconciliación al (re)conectar: lo que IBKR conoce manda; lo que no conoce queda en UNKNOWN.
+        known = set()
+        for trade in ib.trades():
+            if trade.order.orderRef:
+                known.add(trade.order.orderRef)
+                self._sync_trade(trade)
+        changed = mark_missing_as_unknown(self.orders, known)
+        if changed:
+            log_event(log, "Órdenes sin confirmar tras reconectar", logging.WARNING, orders=changed)
+
+    def _sync_trade(self, trade) -> None:
+        ref = trade.order.orderRef
+        if not ref:
+            return
+        commission = None
+        fees = [f.commissionReport for f in trade.fills if f.commissionReport and f.commissionReport.commission]
+        if fees:
+            commission = Money(amount=_q(sum((Decimal(str(r.commission)) for r in fees), Decimal("0"))),
+                               currency=fees[0].currency or trade.contract.currency)
+        st = trade.orderStatus
+        try:
+            sync_order(self.orders, BrokerOrderStatus(
+                client_order_id=ref,
+                status=st.status,
+                filled=to_decimal(st.filled) or Decimal("0"),
+                avg_fill_price=to_decimal(st.avgFillPrice) or None,
+                commission=commission,
+                order_id=trade.order.orderId or None,
+                perm_id=trade.order.permId or None,
+                message=self._errors.get(trade.order.orderId) or (trade.log[-1].message if trade.log else None),
+            ))
+        except Exception as exc:  # noqa: BLE001 - un fallo de sincronización no debe tumbar la conexión
+            log_event(log, "No se pudo sincronizar la orden", logging.ERROR, client_order_id=ref, error=str(exc))
 
     async def _poll(self, ib, account_id: str) -> None:
         # 3 = diferidos si no hay suscripción; IB devuelve tiempo real cuando la cuenta la tiene.
@@ -298,6 +455,7 @@ class IbkrPaperBroker:
                       for cid, t in tickers.items()}
             freshness = overall_freshness(quotes.values())
             now = datetime.now(timezone.utc)
+            mode = "conexión con envío de órdenes Paper" if self.orders_enabled else "conexión de solo lectura"
             try:
                 account = build_account(ib.accountValues(account_id), account_id=account_id,
                                         daily_pnl=to_decimal(pnl.dailyPnL), quotes=freshness, now=now)
@@ -306,7 +464,7 @@ class IbkrPaperBroker:
             else:
                 self._publish(BrokerSnapshot(
                     link="conectado",
-                    detail=f"IB Gateway Paper ({self.host}:{self.port}), conexión de solo lectura",
+                    detail=f"IB Gateway Paper ({self.host}:{self.port}), {mode}",
                     account=account,
                     positions=build_positions(items, quotes),
                     quotes=freshness,
