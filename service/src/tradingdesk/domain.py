@@ -84,7 +84,7 @@ class Position(Model):
     avg_price: Decimal
     last_price: Decimal
     unrealized_pnl: Money
-    change_pct: Decimal
+    change_pct: Decimal | None
     stop: Decimal | None = None
     target: Decimal | None = None
     estimated_fee: Money | None = None
@@ -216,3 +216,4 @@ class SystemStatus(Model):
     trading_allowed: bool
     alerts: list[str]
     service_version: str
+    max_order_value: Money | None = None

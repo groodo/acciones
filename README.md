@@ -3,8 +3,9 @@
 Aplicación nativa de macOS para supervisar una cuenta **IBKR Paper** con señales de **Kronos-small** ejecutado en local.
 El PRD (v1.0, 15/10/2026) no se versiona en este repositorio público; las notas de cada hito están en [docs/](docs/).
 
-> **Estado: Hito A (estructura funcional).** Todo lo que muestra la aplicación son **DATOS SIMULADOS**.
-> No hay conexión con Interactive Brokers ni modelo de IA, y no existe ninguna ruta de código capaz de enviar una orden a un bróker.
+> **Estado: Hito B en curso.** Por defecto todo son **DATOS SIMULADOS**. Opcionalmente, el saldo, las posiciones y las
+> cotizaciones pueden leerse de la cuenta **Paper** de IBKR en solo lectura ([docs/hito-b.md](docs/hito-b.md)).
+> No hay modelo de IA y no existe ninguna ruta de código capaz de enviar una orden a un bróker.
 
 ## Estructura
 
@@ -41,6 +42,11 @@ docs/       Notas del Hito A: decisiones técnicas y límites conocidos
    O ábrela en Xcode con `open app/Package.swift` y ejecuta el esquema `AITradingDesk`.
 
 3. Para generar `AI Trading Desk.app` (sin firmar): `scripts/package_macos.sh` (deja el resultado en `dist/`).
+   La app empaquetada arranca sola el servicio (con la cuenta Paper de IBKR) y lo detiene al salir, así que basta con
+   abrirla; los pasos 1 y 2 solo hacen falta para desarrollar.
+
+Para usar la cuenta Paper de IBKR en vez de datos simulados, abre IB Gateway (Paper, puerto 4002) y arranca
+el servicio con `TRADINGDESK_DATA_SOURCE=ibkr scripts/run_service.sh`. Detalles en [docs/hito-b.md](docs/hito-b.md).
 
 Variables opcionales del servicio: `TRADINGDESK_PORT`, `TRADINGDESK_DATA_DIR`, `TRADINGDESK_LOG_LEVEL`.
 Si cambias el puerto o la carpeta de datos, exporta las mismas variables antes de lanzar la app.
@@ -70,6 +76,7 @@ Cada respuesta va envuelta en `{source, is_mock, mode, generated_at, notice, dat
 | GET | `/v1/signals` | Tabla de oportunidades |
 | GET | `/v1/orders` | Órdenes (`?open_only=true` para abiertas) |
 | GET | `/v1/orders/{id}/events` | Cronología de estados de una orden |
+| POST | `/v1/orders/paper` | Orden limitada en la cuenta Paper de IBKR, tras controles de riesgo (solo fuente `ibkr`) |
 | POST | `/v1/orders/simulated` | Crea un borrador `DRAFT` simulado (idempotente por `client_order_id`) |
-| POST | `/v1/orders/{id}/cancel` | Cancela un borrador |
+| POST | `/v1/orders/{id}/cancel` | Cancela un borrador o pide a IBKR cancelar una orden Paper aceptada |
 | GET/POST | `/v1/kill-switch` | Consulta o activa «Detener operativa» |

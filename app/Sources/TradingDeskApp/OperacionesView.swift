@@ -24,12 +24,23 @@ struct OperacionesView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("Vista", selection: $tab) {
-                ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+            HStack {
+                Picker("Vista", selection: $tab) {
+                    ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360)
+                Spacer()
+                Button {
+                    model.openPaperOrder()
+                } label: {
+                    Label("Nueva orden Paper", systemImage: "plus.circle")
+                }
+                .disabled(!model.canSendPaperOrders)
+                .help(model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
+                      : "Requiere IB Gateway conectado en Negociación simulada y la operativa no detenida")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 360)
 
             OrdersTable(rows: rows, selection: $selection)
             .onChange(of: selection) { _, newValue in
@@ -103,6 +114,13 @@ struct OrderTimeline: View {
                 }
                 if order.state == .draft || order.state == .riskApproved {
                     Button("Cancelar borrador") { Task { await model.cancel(order) } }
+                }
+                if !order.isMock && (order.state == .acknowledged || order.state == .partiallyFilled) {
+                    Button("Cancelar orden en IBKR Paper") { Task { await model.cancel(order) } }
+                }
+                if order.state == .unknown {
+                    Text("IBKR no ha confirmado esta orden. Revísala en IB Gateway antes de repetirla: nunca se reenvía sola.")
+                        .font(.caption).foregroundStyle(.orange)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

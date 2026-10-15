@@ -10,16 +10,21 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
 APP="$OUT/AI Trading Desk.app"
-VERSION="0.1.0"
+VERSION="0.2.0"
+PYTHON="${PYTHON:-python3}"
 
 (cd "$ROOT/app" && swift build -c release --arch arm64)
 BIN="$(cd "$ROOT/app" && swift build -c release --arch arm64 --show-bin-path)/AITradingDesk"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/service"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/AITradingDesk"
-# Se incluye el código del servicio para referencia; en Hito A se arranca aparte con scripts/run_service.sh.
-cp -R "$ROOT/service/src" "$ROOT/service/pyproject.toml" "$APP/Contents/Resources/service/"
+# Entorno Python del servicio dentro del bundle: la app lo arranca al abrirse y lo detiene al salir.
+# Usa el Python 3.11+ de este Mac (el entorno enlaza con él, no lo copia).
+RUNTIME="$APP/Contents/Resources/service-runtime"
+"$PYTHON" -m venv "$RUNTIME"
+"$RUNTIME/bin/python" -m pip install --quiet --upgrade pip
+"$RUNTIME/bin/python" -m pip install --quiet "$ROOT/service"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -47,3 +52,4 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "Creado: $APP (sin firmar). Ábrelo con clic derecho > Abrir la primera vez."
+echo "La app arranca sola el servicio local (fuente IBKR Paper; abre antes IB Gateway en Negociación simulada)."

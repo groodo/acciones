@@ -70,5 +70,8 @@ struct RootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .sheet(item: $model.paperOrderDraft) { draft in
+            PaperOrderSheet(draft: draft).environmentObject(model)
+        }
     }
 }

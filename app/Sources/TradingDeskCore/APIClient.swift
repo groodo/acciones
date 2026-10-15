@@ -11,7 +11,7 @@ public enum APIError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .serviceUnavailable(let detail):
-            return "Servicio local no disponible. Arráncalo con scripts/run_service.sh. (\(detail))"
+            return "Servicio local no disponible. La app intenta arrancarlo sola; si no lo consigue, reiníciala. (\(detail))"
         case .unauthorized:
             return "El servicio local rechazó el token. Reinicia el servicio y la aplicación."
         case .missingToken(let path):
@@ -19,7 +19,7 @@ public enum APIError: Error, LocalizedError, Equatable {
         case .blocked(let message):
             return message
         case .http(let code, let message):
-            return "Error \(code) del servicio local: \(message)"
+            return message.isEmpty ? "Error \(code) del servicio local." : message
         case .decoding(let detail):
             return "Respuesta del servicio no válida: \(detail)"
         }
@@ -106,6 +106,10 @@ public final class APIClient: Sendable {
         try await send("POST", "/v1/orders/simulated", body: try JSON.encoder().encode(request))
     }
 
+    public func createPaperOrder(_ request: PaperOrderRequest) async throws -> Envelope<OrderRecord> {
+        try await send("POST", "/v1/orders/paper", body: try JSON.encoder().encode(request))
+    }
+
     public func cancelOrder(_ clientOrderId: String) async throws -> Envelope<OrderRecord> {
         try await send("POST", "/v1/orders/\(clientOrderId)/cancel", body: nil)
     }
@@ -164,6 +168,12 @@ public final class APIClient: Sendable {
 
     static func detail(from data: Data) -> String? {
         struct Detail: Decodable { let detail: String }
-        return (try? JSONDecoder().decode(Detail.self, from: data))?.detail
+        struct Validation: Decodable {
+            struct Item: Decodable { let msg: String }
+            let detail: [Item]
+        }
+        if let text = (try? JSONDecoder().decode(Detail.self, from: data))?.detail { return text }
+        // Errores de validación de FastAPI (422): lista de mensajes.
+        return (try? JSONDecoder().decode(Validation.self, from: data))?.detail.map(\.msg).joined(separator: " ")
     }
 }
