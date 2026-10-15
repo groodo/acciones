@@ -31,39 +31,13 @@ struct OperacionesView: View {
             .labelsHidden()
             .frame(maxWidth: 360)
 
-            Table(rows, selection: $selection) {
-                TableColumn("ID interno") { o in Text(o.clientOrderId).font(.system(.body, design: .monospaced)) }
-                TableColumn("Origen") { o in Text(o.isMock ? "SIMULADA" : o.mode.uppercased()) }
-                TableColumn("Símbolo") { o in Text(o.symbol) }
-                TableColumn("Lado") { o in Text(o.side == "BUY" ? "Compra" : "Venta") }
-                TableColumn("Unidades") { o in Text("\(Fmt.number(o.filledQuantity.value, fractionDigits: 0))/\(Fmt.number(o.quantity.value, fractionDigits: 0))") }
-                TableColumn("Límite") { o in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
-                TableColumn("Precio medio") { o in Text(o.avgFillPrice.map { Fmt.money($0.value, currency: o.currency) } ?? "—") }
-                TableColumn("Comisión") { o in Text(o.commission.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
-                TableColumn("Estado") { o in Text(o.state.label) }
-                TableColumn("IBKR") { o in Text(o.ibkrOrderId.map { String($0) } ?? "—") }
-                TableColumn("Creada") { o in Text(Fmt.dateTime(o.createdAt)) }
-            }
+            OrdersTable(rows: rows, selection: $selection)
             .onChange(of: selection) { _, newValue in
                 Task { await loadEvents(newValue) }
             }
 
             if let id = selection, let order = model.orders.first(where: { $0.id == id }) {
-                GroupBox("Cronología de \(order.clientOrderId)") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(events.enumerated()), id: \.offset) { _, event in
-                            HStack {
-                                Text(Fmt.dateTime(event.at)).font(.caption).monospacedDigit()
-                                Text("\(event.fromState?.label ?? "—") → \(event.toState.label)").bold()
-                                Text(event.reason).foregroundStyle(.secondary)
-                            }
-                        }
-                        if [.draft, .riskApproved].contains(order.state) {
-                            Button("Cancelar borrador") { Task { await model.cancel(order) } }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                OrderTimeline(order: order, events: events)
             }
         }
         .padding(16)
@@ -72,5 +46,66 @@ struct OperacionesView: View {
     private func loadEvents(_ id: String?) async {
         guard let id else { events = []; return }
         events = (try? await model.client.orderEvents(id).data) ?? []
+    }
+}
+
+/// SwiftUI admite como máximo 10 columnas por tabla.
+struct OrdersTable: View {
+    let rows: [OrderRecord]
+    @Binding var selection: OrderRecord.ID?
+
+    var body: some View {
+        Table(rows, selection: $selection) {
+            TableColumn("ID interno / IBKR") { (o: OrderRecord) in
+                VStack(alignment: .leading) {
+                    Text(o.clientOrderId).font(.system(.body, design: .monospaced))
+                    Text("IBKR: " + (o.ibkrOrderId.map { String($0) } ?? "—")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            TableColumn("Origen") { (o: OrderRecord) in Text(o.isMock ? "SIMULADA" : o.mode.uppercased()) }
+            TableColumn("Símbolo") { (o: OrderRecord) in Text(o.symbol) }
+            TableColumn("Lado") { (o: OrderRecord) in Text(o.side == "BUY" ? "Compra" : "Venta") }
+            TableColumn("Unidades") { (o: OrderRecord) in Text(Self.units(o)) }
+            TableColumn("Límite") { (o: OrderRecord) in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
+            TableColumn("Precio medio") { (o: OrderRecord) in Text(Self.avgPrice(o)) }
+            TableColumn("Comisión") { (o: OrderRecord) in Text(o.commission.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
+            TableColumn("Estado") { (o: OrderRecord) in Text(o.state.label) }
+            TableColumn("Creada") { (o: OrderRecord) in Text(Fmt.dateTime(o.createdAt)) }
+        }
+    }
+
+    static func units(_ o: OrderRecord) -> String {
+        let filled = Fmt.number(o.filledQuantity.value, fractionDigits: 0)
+        let total = Fmt.number(o.quantity.value, fractionDigits: 0)
+        return filled + "/" + total
+    }
+
+    static func avgPrice(_ o: OrderRecord) -> String {
+        guard let price = o.avgFillPrice else { return "—" }
+        return Fmt.money(price.value, currency: o.currency)
+    }
+}
+
+struct OrderTimeline: View {
+    @EnvironmentObject var model: AppModel
+    let order: OrderRecord
+    let events: [OrderEvent]
+
+    var body: some View {
+        GroupBox("Cronología de \(order.clientOrderId)") {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(events.enumerated()), id: \.offset) { _, event in
+                    HStack {
+                        Text(Fmt.dateTime(event.at)).font(.caption).monospacedDigit()
+                        Text((event.fromState?.label ?? "—") + " → " + event.toState.label).bold()
+                        Text(event.reason).foregroundStyle(.secondary)
+                    }
+                }
+                if order.state == .draft || order.state == .riskApproved {
+                    Button("Cancelar borrador") { Task { await model.cancel(order) } }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
