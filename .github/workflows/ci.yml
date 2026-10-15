@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  service:
+    name: Servicio Python
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e "service[dev]"
+      - run: python -m pytest
+        working-directory: service
+
+  app:
+    name: App SwiftUI (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build
+        working-directory: app
+      - run: swift test
+        working-directory: app
+      - run: scripts/package_macos.sh "$RUNNER_TEMP/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Trading-Desk-app
+          path: ${{ runner.temp }}/dist
