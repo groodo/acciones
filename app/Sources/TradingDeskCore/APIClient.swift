@@ -111,6 +111,11 @@ public final class APIClient: Sendable {
         try await send("POST", "/v1/orders/paper", body: try JSON.encoder().encode(request))
     }
 
+    /// Orden limitada REAL: solo funciona si el servicio tiene la cuenta real con órdenes habilitadas.
+    public func createRealOrder(_ request: PaperOrderRequest) async throws -> Envelope<OrderRecord> {
+        try await send("POST", "/v1/orders/real", body: try JSON.encoder().encode(request))
+    }
+
     public func cancelOrder(_ clientOrderId: String) async throws -> Envelope<OrderRecord> {
         try await send("POST", "/v1/orders/\(clientOrderId)/cancel", body: nil)
     }

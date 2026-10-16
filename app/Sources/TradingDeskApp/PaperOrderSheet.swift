@@ -1,7 +1,7 @@
 import SwiftUI
 import TradingDeskCore
 
-/// Hoja para preparar una orden limitada en la cuenta Paper de IBKR.
+/// Hoja para preparar una orden limitada en IBKR (cuenta Paper o, si está habilitada, la cuenta real).
 /// Nada se envía hasta que el usuario revisa el resumen y lo confirma de forma explícita.
 struct PaperOrderSheet: View {
     @EnvironmentObject var model: AppModel
@@ -22,7 +22,7 @@ struct PaperOrderSheet: View {
     private var problem: String? {
         if draft.symbol.trimmingCharacters(in: .whitespaces).isEmpty { return "Escribe el símbolo de la acción." }
         guard let price, price > 0 else { return "Indica un precio límite mayor que cero." }
-        if let cap, let total, total > cap.amount.value {
+        if let cap, cap.currency == "USD", let total, total > cap.amount.value {
             return "El importe supera el tope de \(Fmt.money(cap)) por orden."
         }
         if draft.side == "SELL" {
@@ -33,12 +33,22 @@ struct PaperOrderSheet: View {
     }
 
     private var sideLabel: String { draft.side == "BUY" ? "COMPRAR" : "VENDER" }
+    private var real: Bool { model.isRealTrading }
+    private var accountText: String { real ? "CUENTA REAL: dinero real." : "Cuenta Paper: dinero ficticio." }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Nueva orden en la cuenta Paper", systemImage: "testtube.2").font(.title2).bold()
-            Text("Cuenta de práctica de IBKR: dinero ficticio. Orden limitada válida durante la sesión de hoy.")
-                .font(.callout).foregroundStyle(.secondary)
+            if real {
+                Label("Nueva orden REAL", systemImage: "exclamationmark.octagon.fill").font(.title2).bold()
+                    .foregroundStyle(.red)
+                Text("Tu cuenta real de IBKR: esta orden usa dinero real y no se puede deshacer una vez ejecutada. "
+                     + "Orden limitada válida durante la sesión de hoy.")
+                    .font(.callout).foregroundStyle(.red)
+            } else {
+                Label("Nueva orden en la cuenta Paper", systemImage: "testtube.2").font(.title2).bold()
+                Text("Cuenta de práctica de IBKR: dinero ficticio. Orden limitada válida durante la sesión de hoy.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
 
             Form {
                 Picker("Operación", selection: $draft.side) {
@@ -80,8 +90,9 @@ struct PaperOrderSheet: View {
         .onAppear {
             if let p = draft.limitPrice { priceText = NSDecimalNumber(decimal: p).stringValue }
         }
-        .confirmationDialog("¿Enviar esta orden a IBKR Paper?", isPresented: $confirming, titleVisibility: .visible) {
-            Button("Enviar orden Paper") {
+        .confirmationDialog(real ? "¿Enviar esta orden REAL a IBKR?" : "¿Enviar esta orden a IBKR Paper?",
+                            isPresented: $confirming, titleVisibility: .visible) {
+            Button(real ? "Enviar orden REAL" : "Enviar orden Paper", role: real ? .destructive : nil) {
                 Task {
                     sending = true
                     var final = draft
@@ -93,7 +104,7 @@ struct PaperOrderSheet: View {
             Button("Volver", role: .cancel) {}
         } message: {
             Text("\(sideLabel) \(draft.quantity) \(draft.symbol) con límite \(price.map { Fmt.money($0, currency: "USD") } ?? "—"). "
-                 + "Importe máximo \(total.map { Fmt.money($0, currency: "USD") } ?? "—"). Cuenta Paper: dinero ficticio.")
+                 + "Importe máximo \(total.map { Fmt.money($0, currency: "USD") } ?? "—"). \(accountText)")
         }
     }
 }

@@ -48,7 +48,13 @@ from .domain import (
 from .logging_setup import log_event
 from .mock_data import MOCK_NOTICE, MockProvider, seed_mock_orders
 from .orders import OrderError, OrderStore
-from .paper_orders import PaperOrderRequest, RiskRejection, check_order_limits, check_price_band
+from .paper_orders import (
+    PaperOrderRequest,
+    RiskRejection,
+    check_order_limits,
+    check_price_band,
+    check_real_order_value,
+)
 from .model_runner import Forecaster, KronosForecaster
 from .safety import KillSwitch, market_is_open
 from .signal_engine import SignalEngine
@@ -94,8 +100,9 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         seed_mock_orders(orders, provider.now())
     if broker is None and settings.data_source == "ibkr":
         broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id, orders=orders,
-                                 orders_enabled=settings.paper_orders and not settings.real_account,
-                                 account_kind="real" if settings.real_account else "paper")
+                                 orders_enabled=settings.real_trading or (settings.paper_orders and not settings.real_account),
+                                 account_kind="real" if settings.real_account else "paper",
+                                 allow_real_orders=settings.real_trading)
     if broker is None:
         _record_snapshot(db, provider.account())
     engine: SignalEngine | None = None
@@ -131,6 +138,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
 
     last_recorded: list[datetime] = []
+    order_mode = "live" if settings.real_account else settings.mode
     record_lock = threading.Lock()
 
     def broker_snapshot():
@@ -183,7 +191,11 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         market_detail = "Sesión regular 9:30–16:00 America/New_York (festivos no contemplados)"
         if broker is not None:
             snap = broker.snapshot()
-            if settings.real_account:
+            if settings.real_trading:
+                alerts = [f"CUENTA REAL: órdenes con dinero real. Solo limitadas, con tu confirmación en cada una y "
+                          f"un tope de {settings.max_real_order_eur} € por orden.",
+                          "Las previsiones de Kronos son orientativas, no una recomendación."]
+            elif settings.real_account:
                 alerts = ["Cuenta REAL de IBKR en solo lectura: la app no puede enviar ni cancelar órdenes.",
                           "Las previsiones de Kronos son orientativas, no una recomendación."]
             elif broker.orders_enabled:
@@ -200,12 +212,14 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             return ibkr_envelope(SystemStatus(
                 broker=snap.link, broker_detail=snap.detail,
                 mode="live" if settings.real_account else settings.mode,
-                mode_label="REAL · SOLO LECTURA" if settings.real_account else "PAPER",
+                mode_label="REAL · CON ÓRDENES" if settings.real_trading
+                else "REAL · SOLO LECTURA" if settings.real_account else "PAPER",
                 market="abierto" if is_open else "cerrado", market_detail=market_detail, quotes=snap.quotes,
                 last_update=snap.updated_at or now, kill_switch_active=ks,
                 trading_allowed=broker.orders_enabled and snap.link == "conectado" and not ks,
                 alerts=alerts, service_version=__version__,
-                max_order_value=Money(amount=settings.max_order_value, currency="USD")
+                max_order_value=(Money(amount=settings.max_real_order_eur, currency="EUR") if settings.real_trading
+                                 else Money(amount=settings.max_order_value, currency="USD"))
                 if broker.orders_enabled else None,
             ))
         alerts = ["Cuenta Paper simulada: las operaciones no utilizan dinero real.",
@@ -270,7 +284,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     @app.get("/v1/orders", response_model=Envelope[list[OrderRecord]])
     def list_orders(open_only: bool = False):
         if broker is not None:
-            return ibkr_envelope(orders.list(mode=settings.mode, is_mock=False, open_only=open_only))
+            return ibkr_envelope(orders.list(mode=order_mode, is_mock=False, open_only=open_only))
         return envelope(orders.list(mode=settings.mode, open_only=open_only))
 
     @app.get("/v1/orders/{client_order_id}/events", response_model=Envelope[list[OrderEvent]])
@@ -300,9 +314,22 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     @app.post("/v1/orders/paper", response_model=Envelope[OrderRecord], status_code=201)
     def create_paper_order(req: PaperOrderRequest):
         if settings.real_account:
-            raise HTTPException(409, "Cuenta real conectada en solo lectura: la app no envía órdenes.")
+            raise HTTPException(409, "Hay una cuenta real conectada: no se envían órdenes Paper.")
         if broker is None or not broker.orders_enabled:
             raise HTTPException(409, "El envío de órdenes Paper no está habilitado (hace falta la fuente IBKR).")
+        return place_order(req, live=False)
+
+    @app.post("/v1/orders/real", response_model=Envelope[OrderRecord], status_code=201)
+    def create_real_order(req: PaperOrderRequest):
+        """Orden limitada REAL. Solo con la cuenta ``real-trading``, tu confirmación y el tope en euros."""
+        if not settings.real_trading:
+            raise HTTPException(409, "Las órdenes reales no están habilitadas: la cuenta real está en solo lectura.")
+        if broker is None or not broker.orders_enabled or getattr(broker, "order_mode", "paper") != "live":
+            raise HTTPException(409, "El conector de IBKR no tiene habilitadas las órdenes reales.")
+        return place_order(req, live=True)
+
+    def place_order(req: PaperOrderRequest, *, live: bool):
+        mode = "live" if live else settings.mode
         if kill_switch.active:
             raise HTTPException(423, "Operativa detenida: no se aceptan nuevas entradas.")
         existing = orders.get(req.client_order_id)
@@ -310,26 +337,34 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             # Reintento de la misma petición: se devuelve la orden sin reenviarla.
             same = (existing.symbol, existing.side, existing.quantity, existing.limit_price) == (
                 req.symbol, req.side, req.quantity, req.limit_price)
-            if not same or existing.is_mock:
+            if not same or existing.is_mock or existing.mode != mode:
                 raise HTTPException(409, "client_order_id ya usado con otros parámetros")
             return JSONResponse(ibkr_envelope(existing).model_dump(mode="json"), status_code=200)
         snap = broker_snapshot()
         try:
-            check_order_limits(req, positions=snap.positions, max_order_value=settings.max_order_value)
+            if live:
+                check_order_limits(req, positions=snap.positions, max_order_value=req.quantity * req.limit_price)
+                value_eur = check_real_order_value(req, snap.account, settings.max_real_order_eur)
+                limit_text = f"importe {value_eur:.2f} € ≤ {settings.max_real_order_eur} €"
+            else:
+                check_order_limits(req, positions=snap.positions, max_order_value=settings.max_order_value)
+                limit_text = f"importe ≤ {settings.max_order_value}"
             check_price_band(req, broker.reference_price(req.symbol, req.currency))
         except RiskRejection as exc:
             raise HTTPException(422, str(exc)) from exc
         except BrokerUnavailable as exc:
             raise HTTPException(503 if not str(exc).startswith("IBKR no reconoce") else 422, str(exc)) from exc
         order, _ = orders.create_draft(
-            client_order_id=req.client_order_id, mode=settings.mode, is_mock=False, symbol=req.symbol,
+            client_order_id=req.client_order_id, mode=mode, is_mock=False, symbol=req.symbol,
             side=req.side, quantity=req.quantity, limit_price=req.limit_price, currency=req.currency,
-            note="Orden limitada en la cuenta Paper de IBKR (dinero ficticio)",
+            note="Orden limitada REAL en IBKR (dinero real)" if live
+            else "Orden limitada en la cuenta Paper de IBKR (dinero ficticio)",
+            allow_live=live and settings.real_trading,
         )
         orders.transition(order.client_order_id, OrderState.RISK_APPROVED,
-                          f"Controles superados: confirmada, importe ≤ {settings.max_order_value}, "
-                          "precio dentro del 5 % de la referencia")
-        log_event(log, "Orden Paper aprobada", client_order_id=order.client_order_id, symbol=req.symbol,
+                          f"Controles superados: confirmada, {limit_text}, precio dentro del 5 % de la referencia")
+        log_event(log, "Orden REAL aprobada" if live else "Orden Paper aprobada",
+                  client_order_id=order.client_order_id, symbol=req.symbol,
                   side=req.side.value, quantity=str(req.quantity), limit=str(req.limit_price))
         try:
             broker.submit(order.client_order_id)
@@ -371,7 +406,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             active=st["active"],
             reason=st["reason"],
             changed_at=datetime.fromisoformat(st["changed_at"]) if st["changed_at"] else None,
-            open_orders=orders.list(mode=settings.mode, open_only=True,
+            open_orders=orders.list(mode=order_mode, open_only=True,
                                     is_mock=False if broker is not None else None),
             open_positions=current_positions(),
             message=("Operativa detenida. Se bloquean nuevas entradas; las órdenes y posiciones listadas "

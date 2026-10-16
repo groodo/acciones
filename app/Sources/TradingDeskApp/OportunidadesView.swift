@@ -107,16 +107,17 @@ struct SignalDetail: View {
                             .help(signal.status == .paperReady ? "Crea un borrador SIMULADO; no se envía a ningún bróker"
                                                                : "Solo disponible para señales aptas para paper")
                     }
-                    Button("Preparar orden Paper…") {
+                    Button(model.isRealTrading ? "Preparar orden REAL…" : "Preparar orden Paper…") {
                         model.openPaperOrder(symbol: signal.symbol,
                                              side: signal.proposal == .sellPosition ? "SELL" : "BUY",
                                              price: signal.price?.value)
                     }
                     .disabled(!model.canSendPaperOrders)
-                    .help("Abre una orden limitada en la cuenta Paper. Revisa el precio antes de confirmar.")
+                    .help(model.isRealTrading ? "Abre una orden limitada en tu cuenta REAL. Revisa el precio antes de confirmar."
+                          : "Abre una orden limitada en la cuenta Paper. Revisa el precio antes de confirmar.")
                     Button("Descartar") { model.actionMessage = "Señal \(signal.symbol) descartada (solo en esta sesión)." }
                 }
-                // No existe botón de operación REAL: no hay habilitación live en el backend.
+                // Las órdenes reales solo existen con la cuenta «real-trading» y siempre con confirmación manual.
             }
             .padding(16)
         }

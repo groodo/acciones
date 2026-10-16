@@ -5,10 +5,13 @@ simulada (``mock``) o IBKR (``ibkr``). Con IBKR, ``ib_account`` elige la cuenta:
 
 - ``paper`` (por defecto): cuenta Paper, con envío de órdenes limitadas si está habilitado.
 - ``real-readonly``: cuenta REAL en solo lectura. Saldo, posiciones, cotizaciones y
-  velas para Kronos; el envío de órdenes queda desactivado sin excepción. Se elige
-  con ``TRADINGDESK_IB_ACCOUNT`` o con el archivo ``ib-account`` de la carpeta de datos.
+  velas para Kronos; el envío de órdenes queda desactivado sin excepción.
+- ``real-trading``: cuenta REAL con órdenes limitadas, cada una confirmada por el
+  usuario en la app y con un tope por orden en euros (``TRADINGDESK_MAX_REAL_ORDER_EUR``,
+  como máximo ``REAL_ORDER_CEILING_EUR``, el importe que el usuario autorizó por escrito).
 
-El envío de órdenes con dinero real no existe en el backend (PRD §14 SAFETY-02).
+La cuenta se elige con ``TRADINGDESK_IB_ACCOUNT`` o con el archivo ``ib-account`` de la
+carpeta de datos.
 """
 
 from __future__ import annotations
@@ -23,7 +26,10 @@ from pathlib import Path
 
 ALLOWED_MODES = frozenset({"paper"})
 ALLOWED_DATA_SOURCES = frozenset({"mock", "ibkr"})
-ALLOWED_IB_ACCOUNTS = frozenset({"paper", "real-readonly"})
+ALLOWED_IB_ACCOUNTS = frozenset({"paper", "real-readonly", "real-trading"})
+REAL_ACCOUNTS = frozenset({"real-readonly", "real-trading"})
+# Tope máximo por orden real que el usuario autorizó por escrito (16-10-2026). Subirlo exige cambiar el código.
+REAL_ORDER_CEILING_EUR = Decimal("1000")
 IB_ACCOUNT_FILE = "ib-account"
 DEFAULT_PORT = 8765
 # Puertos por defecto de IB Gateway / TWS. Los de cuenta real se rechazan.
@@ -54,6 +60,7 @@ class Settings:
     ib_port: int = IB_PAPER_GATEWAY_PORT
     ib_client_id: int = 17
     ib_account: str = "paper"
+    max_real_order_eur: Decimal = REAL_ORDER_CEILING_EUR
     # Envío de órdenes limitadas a la cuenta Paper (solo con data_source="ibkr").
     paper_orders: bool = True
     max_order_value: Decimal = Decimal("1000")
@@ -63,8 +70,13 @@ class Settings:
 
     @property
     def real_account(self) -> bool:
-        """Cuenta REAL de IBKR en solo lectura (nunca envía órdenes)."""
-        return self.data_source == "ibkr" and self.ib_account == "real-readonly"
+        """Cuenta REAL de IBKR (en solo lectura o con órdenes)."""
+        return self.data_source == "ibkr" and self.ib_account in REAL_ACCOUNTS
+
+    @property
+    def real_trading(self) -> bool:
+        """Cuenta REAL con envío de órdenes limitadas confirmadas una a una."""
+        return self.data_source == "ibkr" and self.ib_account == "real-trading"
 
     @property
     def kronos_dir(self) -> Path:
@@ -91,9 +103,12 @@ class Settings:
         if self.data_source not in ALLOWED_DATA_SOURCES:
             raise ConfigError(f"Fuente de datos '{self.data_source}' no disponible (solo 'mock' o 'ibkr').")
         if self.ib_account not in ALLOWED_IB_ACCOUNTS:
-            raise ConfigError(f"Cuenta IBKR '{self.ib_account}' no válida (solo 'paper' o 'real-readonly').")
-        if self.ib_account == "real-readonly" and self.paper_orders:
-            raise ConfigError("Con la cuenta real en solo lectura el envío de órdenes debe estar desactivado.")
+            raise ConfigError(f"Cuenta IBKR '{self.ib_account}' no válida "
+                              "(solo 'paper', 'real-readonly' o 'real-trading').")
+        if self.ib_account in REAL_ACCOUNTS and self.paper_orders:
+            raise ConfigError("Con la cuenta real no hay órdenes Paper: TRADINGDESK_PAPER_ORDERS debe estar desactivado.")
+        if not (Decimal("0") < self.max_real_order_eur <= REAL_ORDER_CEILING_EUR):
+            raise ConfigError(f"TRADINGDESK_MAX_REAL_ORDER_EUR debe estar entre 0 y {REAL_ORDER_CEILING_EUR} €.")
         if self.ib_account == "paper" and self.ib_port in IB_LIVE_PORTS:
             raise ConfigError(f"El puerto {self.ib_port} es el de cuenta real de IBKR. Usa el de Paper "
                               f"({IB_PAPER_GATEWAY_PORT} en IB Gateway o 7497 en TWS).")
@@ -122,7 +137,7 @@ class Settings:
 
         data_dir = Path(env.get("TRADINGDESK_DATA_DIR") or default_data_dir()).expanduser()
         ib_account = (env.get("TRADINGDESK_IB_ACCOUNT") or _read_account_file(data_dir) or "paper").strip().lower()
-        real = ib_account == "real-readonly"
+        real = ib_account in REAL_ACCOUNTS
         return cls(
             data_dir=data_dir,
             host=env.get("TRADINGDESK_HOST", "127.0.0.1"),
@@ -134,6 +149,7 @@ class Settings:
             ib_port=number("TRADINGDESK_IB_PORT", IB_LIVE_GATEWAY_PORT if real else IB_PAPER_GATEWAY_PORT),
             ib_client_id=number("TRADINGDESK_IB_CLIENT_ID", 17),
             ib_account=ib_account,
+            max_real_order_eur=_decimal(env.get("TRADINGDESK_MAX_REAL_ORDER_EUR", str(REAL_ORDER_CEILING_EUR))),
             # Con la cuenta real no hay envío de órdenes, se pida lo que se pida.
             paper_orders=not real and env.get("TRADINGDESK_PAPER_ORDERS", "1").lower() not in ("0", "false", "no"),
             max_order_value=_decimal(env.get("TRADINGDESK_MAX_ORDER_VALUE", "1000")),

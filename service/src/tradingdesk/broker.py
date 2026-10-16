@@ -7,9 +7,11 @@ Se leen saldo, posiciones y cotizaciones a través de la TWS API oficial
   Si la cuenta conectada no es Paper (los identificadores Paper empiezan por
   ``DU``), se desconecta y no reintenta; además se comprueba otra vez antes de
   cada envío.
-- Real en solo lectura (``account_kind="real"``): la conexión es siempre
-  ``readonly=True`` y el envío de órdenes queda desactivado sin posibilidad de
-  activarlo (``submit`` además exige cuenta Paper).
+- Real (``account_kind="real"``): exige una cuenta que no sea Paper. Por defecto es
+  de solo lectura (``readonly=True``). Solo con ``allow_real_orders=True`` (cuenta
+  ``real-trading`` en la configuración) se envían órdenes limitadas ya confirmadas
+  por el usuario y aprobadas por los controles de riesgo; ``submit`` comprueba de
+  nuevo el tipo de cuenta y el modo de la orden antes de cada envío.
 
 La API de IB es asíncrona; se ejecuta en un hilo propio con su bucle de eventos
 y publica instantáneas inmutables que la API HTTP lee sin bloquear.
@@ -45,7 +47,7 @@ BrokerLink = Literal["conectado", "desconectado", "reconectando"]
 
 
 class NotPaperAccountError(RuntimeError):
-    """La sesión de IB Gateway no es de una cuenta Paper."""
+    """La sesión de IB Gateway no es del tipo de cuenta configurado (Paper o real)."""
 
 
 class BrokerUnavailable(RuntimeError):
@@ -242,12 +244,15 @@ class IbkrPaperBroker:
     """
 
     def __init__(self, host: str, port: int, client_id: int, *, orders: OrderStore | None = None,
-                 orders_enabled: bool = False, account_kind: Literal["paper", "real"] = "paper"):
+                 orders_enabled: bool = False, account_kind: Literal["paper", "real"] = "paper",
+                 allow_real_orders: bool = False):
         self.host, self.port, self.client_id = host, port, client_id
         self.orders = orders
         self.account_kind = account_kind
-        # Cuenta real: solo lectura, sin excepción.
-        self.orders_enabled = orders_enabled and orders is not None and account_kind == "paper"
+        # Cuenta real: solo lectura salvo que la configuración lo permita de forma explícita.
+        self.orders_enabled = orders_enabled and orders is not None and (
+            account_kind == "paper" or allow_real_orders)
+        self.order_mode = "live" if account_kind == "real" else "paper"
         self._lock = threading.Lock()
         self._snapshot = BrokerSnapshot(link="desconectado", detail="Conectando con IB Gateway…")
         self._stop = threading.Event()
@@ -304,23 +309,28 @@ class IbkrPaperBroker:
                 ib.cancelMktData(contract)
         return self._call(run)
 
+    def _account_matches(self) -> bool:
+        account = self._account or ""
+        return is_paper_account(account) if self.account_kind == "paper" else bool(account) and not is_paper_account(account)
+
     def submit(self, client_order_id: str) -> None:
-        """Envía a IBKR Paper una orden ya aprobada por riesgo (RISK_APPROVED → SUBMITTING)."""
+        """Envía a IBKR una orden ya confirmada y aprobada por riesgo (RISK_APPROVED → SUBMITTING)."""
         if not self.orders_enabled:
             raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
 
         async def run(ib):
             from ib_async import LimitOrder
 
-            if not is_paper_account(self._account or ""):
-                raise NotPaperAccountError("La cuenta conectada no es Paper.")
+            if not self._account_matches():
+                raise NotPaperAccountError("La cuenta conectada no es la configurada: no se envía.")
             order = self.orders.get(client_order_id)
-            if order is None or order.is_mock or order.mode != "paper" or order.state is not OrderState.RISK_APPROVED:
+            if order is None or order.is_mock or order.mode != self.order_mode or order.state is not OrderState.RISK_APPROVED:
                 raise BrokerUnavailable("La orden no está lista para enviarse.")
             contract = await self._qualify(ib, order.symbol, order.currency)
             ib_order = LimitOrder(order.side.value, float(order.quantity), float(order.limit_price),
                                   account=self._account, orderRef=client_order_id, tif="DAY")
-            self.orders.transition(client_order_id, OrderState.SUBMITTING, "Enviando a IBKR Paper")
+            self.orders.transition(client_order_id, OrderState.SUBMITTING,
+                                   "Enviando a IBKR (cuenta REAL)" if self.order_mode == "live" else "Enviando a IBKR Paper")
             try:
                 trade = ib.placeOrder(contract, ib_order)
             except Exception as exc:
@@ -328,7 +338,8 @@ class IbkrPaperBroker:
                 self.orders.transition(client_order_id, OrderState.UNKNOWN, f"Error al enviar: {exc}")
                 raise
             self.orders.set_broker_ids(client_order_id, trade.order.orderId, trade.order.permId or None)
-            log_event(log, "Orden Paper enviada", client_order_id=client_order_id, order_id=trade.order.orderId)
+            log_event(log, "Orden enviada", client_order_id=client_order_id, order_id=trade.order.orderId,
+                      mode=self.order_mode)
         self._call(run)
 
     def cancel(self, client_order_id: str) -> None:
@@ -400,8 +411,12 @@ class IbkrPaperBroker:
                     raise ConnectionError("IB Gateway no ha indicado ninguna cuenta")
                 if self.account_kind == "paper" and not all(is_paper_account(a) for a in accounts):
                     raise NotPaperAccountError(
-                        "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: esta versión solo "
-                        "admite Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
+                        "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: la app está configurada "
+                        "para Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
+                if self.account_kind == "real" and any(is_paper_account(a) for a in accounts):
+                    raise NotPaperAccountError(
+                        "La app está configurada para tu cuenta real, pero IB Gateway tiene abierta una sesión Paper. "
+                        "Inicia sesión con tu usuario real.")
                 attempt = 0
                 self._account = accounts[0]
                 if self.orders_enabled:
@@ -411,7 +426,7 @@ class IbkrPaperBroker:
                           kind=self.account_kind, orders=self.orders_enabled)
                 await self._poll(ib, accounts[0])
             except NotPaperAccountError as exc:
-                log_event(log, "Cuenta no Paper: conexión rechazada", logging.ERROR)
+                log_event(log, "Tipo de cuenta distinto del configurado: conexión rechazada", logging.ERROR)
                 self._publish(BrokerSnapshot(link="desconectado", detail=str(exc)))
                 ib.disconnect()
                 return
@@ -448,7 +463,7 @@ class IbkrPaperBroker:
             if trade.order.orderRef:
                 known.add(trade.order.orderRef)
                 self._sync_trade(trade)
-        changed = mark_missing_as_unknown(self.orders, known)
+        changed = mark_missing_as_unknown(self.orders, known, mode=self.order_mode)
         if changed:
             log_event(log, "Órdenes sin confirmar tras reconectar", logging.WARNING, orders=changed)
 
@@ -494,7 +509,12 @@ class IbkrPaperBroker:
                       for cid, t in tickers.items()}
             freshness = overall_freshness(quotes.values())
             now = datetime.now(timezone.utc)
-            mode = "conexión con envío de órdenes Paper" if self.orders_enabled else "conexión de solo lectura"
+            if not self.orders_enabled:
+                mode = "conexión de solo lectura"
+            elif self.order_mode == "live":
+                mode = "órdenes REALES con confirmación"
+            else:
+                mode = "conexión con envío de órdenes Paper"
             label = "cuenta REAL" if self.account_kind == "real" else "Paper"
             try:
                 account = build_account(ib.accountValues(account_id), account_id=account_id,

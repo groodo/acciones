@@ -25,14 +25,16 @@ struct ConfiguracionView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modo de operativa") {
-                LabeledContent("Modo", value: model.status?.mode == "live"
-                               ? "Cuenta REAL en solo lectura (no se envían órdenes)" : "Paper (cuenta de práctica)")
+                LabeledContent("Modo", value: model.isRealTrading ? "Cuenta REAL con órdenes (dinero real)"
+                               : model.status?.mode == "live" ? "Cuenta REAL en solo lectura (no se envían órdenes)"
+                               : "Paper (cuenta de práctica)")
                 if let cap = model.status?.maxOrderValue {
-                    LabeledContent("Órdenes Paper", value: "Habilitadas · tope \(Fmt.money(cap)) por orden")
+                    LabeledContent("Órdenes", value: "Habilitadas · tope \(Fmt.money(cap)) por orden")
                 } else {
-                    LabeledContent("Órdenes Paper", value: "No habilitadas")
+                    LabeledContent("Órdenes", value: "No habilitadas")
                 }
-                Text("El envío de órdenes con dinero real no existe en el servicio: la cuenta real solo se puede conectar en modo lectura.")
+                Text("Las órdenes son siempre limitadas y solo salen tras tu confirmación. Con la cuenta real, el tope "
+                     + "por orden se fija en el servicio y no puede superar los 1000 €.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modelo") {

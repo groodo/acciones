@@ -117,7 +117,8 @@ def test_orders_only_go_out_through_submit_and_readonly_otherwise():
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "IbkrPaperBroker")
     submit = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "submit")
     assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(submit))
-    assert "is_paper_account(self._account" in ast.get_source_segment(source, submit)
+    assert "self._account_matches()" in ast.get_source_segment(source, submit)
+    assert "order.mode != self.order_mode" in ast.get_source_segment(source, submit)
     connect = next(c for c in calls if c.func.attr == "connectAsync")
     readonly = next(k for k in connect.keywords if k.arg == "readonly")
     assert ast.unparse(readonly.value) == "not self.orders_enabled"
@@ -267,3 +268,68 @@ def test_real_equity_curve_ignores_duplicate_instants(tmp_path):
     curve = _real_equity_curve(db, "todo", "paper", now=FIXED_NOW)
     assert len(curve.points) == 1 and curve.sufficient is False
     db.close()
+
+
+def _real_settings(tmp_path, account="real-trading"):
+    from tradingdesk.config import Settings  # noqa: PLC0415
+
+    return Settings(data_dir=tmp_path, data_source="ibkr", ib_account=account, paper_orders=False, ib_port=4001)
+
+
+def _real_snapshot():
+    real_values = [AccountValue("U7654321", v.tag, v.value, v.currency, "") for v in values() if v.account == ACC]
+    acc = build_account(real_values, account_id="U7654321", daily_pnl=None, quotes=Freshness.DELAYED,
+                        now=FIXED_NOW, mode="live")
+    return BrokerSnapshot(link="conectado", detail="IB Gateway cuenta REAL", account=acc, quotes=Freshness.DELAYED,
+                          updated_at=FIXED_NOW)
+
+
+REAL_ORDER = {"client_order_id": "UI-00000009", "symbol": "AAPL", "side": "BUY", "quantity": "2",
+              "limit_price": "100", "currency": "USD", "confirmed": True}
+
+
+def test_real_broker_only_sends_with_explicit_permission():
+    paper_kind = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                               account_kind="real")
+    assert paper_kind.orders_enabled is False
+    real = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                         account_kind="real", allow_real_orders=True)
+    assert real.orders_enabled is True and real.order_mode == "live"
+    real._account = "DU1234567"  # sesión Paper con la app en modo real: no coincide
+    assert real._account_matches() is False
+    real._account = "U7654321"
+    assert real._account_matches() is True
+
+
+def test_api_real_trading_sends_confirmed_order_within_euro_cap(tmp_path):
+    fake = FakeBroker(_real_snapshot(), orders_enabled=True)
+    fake.order_mode = "live"
+    app, client = ibkr_client(_real_settings(tmp_path), fake)
+    with client as c:
+        status = c.get("/v1/status").json()["data"]
+        assert status["mode_label"] == "REAL · CON ÓRDENES" and status["trading_allowed"] is True
+        assert status["max_order_value"] == {"amount": "1000", "currency": "EUR"}
+        assert c.post("/v1/orders/paper", json=REAL_ORDER).status_code == 409
+        assert c.post("/v1/orders/real", json={**REAL_ORDER, "confirmed": False}).status_code == 422
+        too_big = c.post("/v1/orders/real", json={**REAL_ORDER, "client_order_id": "UI-00000010",
+                                                   "quantity": "11"})  # 1100 $ ≈ 1012 € > 1000 €
+        assert too_big.status_code == 422 and "1000" in too_big.json()["detail"]
+        ok = c.post("/v1/orders/real", json=REAL_ORDER)
+        assert ok.status_code == 201
+        order = ok.json()["data"]
+        assert (order["mode"], order["is_mock"], ok.json()["mode"]) == ("live", False, "live")
+        assert [o["client_order_id"] for o in c.get("/v1/orders").json()["data"]] == ["UI-00000009"]
+        c.post("/v1/kill-switch", json={"active": True})
+        assert c.post("/v1/orders/real", json={**REAL_ORDER, "client_order_id": "UI-00000011"}).status_code == 423
+    assert [call for call in fake.calls if call[0] == "submit"] == [("submit", "UI-00000009")]
+    app.state.db.close()
+
+
+def test_api_real_readonly_refuses_real_orders(tmp_path):
+    fake = FakeBroker(_real_snapshot(), orders_enabled=True)
+    fake.order_mode = "live"
+    app, client = ibkr_client(_real_settings(tmp_path, "real-readonly"), fake)
+    with client as c:
+        assert c.post("/v1/orders/real", json=REAL_ORDER).status_code == 409
+    assert not any(call[0] == "submit" for call in fake.calls)
+    app.state.db.close()

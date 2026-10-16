@@ -156,6 +156,8 @@ final class AppModel: ObservableObject {
     @Published var paperOrderDraft: PaperOrderDraft?
 
     var canSendPaperOrders: Bool { status?.tradingAllowed == true && status?.maxOrderValue != nil }
+    /// Cuenta real con órdenes habilitadas: las órdenes mueven dinero real.
+    var isRealTrading: Bool { status?.mode == "live" && canSendPaperOrders }
 
     func openPaperOrder(symbol: String = "", side: String = "BUY", price: Decimal? = nil) {
         paperOrderDraft = PaperOrderDraft(symbol: symbol, side: side, quantity: 1, limitPrice: price)
@@ -165,11 +167,20 @@ final class AppModel: ObservableObject {
     func sendPaperOrder(_ draft: PaperOrderDraft) async -> String? {
         guard let price = draft.limitPrice else { return "Indica un precio límite." }
         do {
-            let order = try await client.createPaperOrder(PaperOrderRequest(
+            let request = PaperOrderRequest(
                 symbol: draft.symbol, side: draft.side, quantity: draft.quantity, limitPrice: price,
                 confirmed: true, clientOrderId: draft.clientOrderId
-            )).data
-            actionMessage = "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
+            )
+            let real = isRealTrading
+            let order: OrderRecord
+            if real {
+                order = try await client.createRealOrder(request).data
+            } else {
+                order = try await client.createPaperOrder(request).data
+            }
+            actionMessage = real
+                ? "Orden REAL \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero real."
+                : "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
             paperOrderDraft = nil
             await refresh()
             return nil

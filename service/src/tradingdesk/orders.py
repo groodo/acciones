@@ -134,10 +134,14 @@ class OrderStore:
         currency: str,
         note: str | None = None,
         created_at: datetime | None = None,
+        allow_live: bool = False,
     ) -> tuple[OrderRecord, bool]:
-        """Crea un DRAFT. Idempotente por ``client_order_id``: devuelve (orden, creada)."""
-        if mode != "paper":
-            raise TradingBlocked("Solo se admiten órdenes Paper en esta versión")
+        """Crea un DRAFT. Idempotente por ``client_order_id``: devuelve (orden, creada).
+
+        Las órdenes ``live`` solo se admiten cuando el servicio está configurado con la cuenta real con órdenes.
+        """
+        if mode != "paper" and not (mode == "live" and allow_live and not is_mock):
+            raise TradingBlocked("Las órdenes reales no están habilitadas en esta configuración")
         at = (created_at or _now()).isoformat()
         with self.db.transaction() as conn:
             existing = conn.execute(

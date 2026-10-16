@@ -35,10 +35,11 @@ struct OperacionesView: View {
                 Button {
                     model.openPaperOrder()
                 } label: {
-                    Label("Nueva orden Paper", systemImage: "plus.circle")
+                    Label(model.isRealTrading ? "Nueva orden REAL" : "Nueva orden Paper", systemImage: "plus.circle")
                 }
                 .disabled(!model.canSendPaperOrders)
-                .help(model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
+                .help(model.isRealTrading ? "Orden limitada en tu cuenta REAL de IBKR (dinero real)"
+                      : model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
                       : model.status?.mode == "live" ? "Cuenta real conectada en solo lectura: no se envían órdenes"
                       : "Requiere IB Gateway conectado en Negociación simulada y la operativa no detenida")
             }

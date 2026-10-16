@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
-from .domain import Money, OrderSide, OrderState, Position
+from .domain import AccountSnapshot, Money, OrderSide, OrderState, Position
 from .orders import ALLOWED_TRANSITIONS, OrderStore
 
 S = OrderState
@@ -46,6 +46,21 @@ def check_order_limits(req: PaperOrderRequest, *, positions: list[Position], max
         if req.quantity > held:
             raise RiskRejection(f"Solo puedes vender acciones que tengas: tienes {held:f} de {req.symbol}. "
                                 "Las ventas en corto no están permitidas.")
+
+
+def check_real_order_value(req: PaperOrderRequest, account: AccountSnapshot | None, cap_eur: Decimal) -> Decimal:
+    """Tope por orden REAL en euros, con el tipo de cambio que da IBKR para la cuenta. Devuelve el importe en EUR."""
+    value = req.quantity * req.limit_price
+    if req.currency == "EUR":
+        value_eur = value
+    elif account is not None and account.fx is not None and account.fx.pair == f"EUR.{req.currency}" \
+            and account.fx.rate > 0:
+        value_eur = value / account.fx.rate
+    else:
+        raise RiskRejection(f"No hay tipo de cambio EUR/{req.currency} de IBKR: no se puede comprobar el tope en euros.")
+    if value_eur > cap_eur:
+        raise RiskRejection(f"La orden equivale a {value_eur:.2f} €. El tope por orden real es {cap_eur:.2f} €.")
+    return value_eur
 
 
 def check_price_band(req: PaperOrderRequest, reference: Decimal | None) -> None:
@@ -110,10 +125,10 @@ def sync_order(store: OrderStore, st: BrokerOrderStatus) -> None:
             move(S.CANCELLED, "Inactiva en IBKR" + detail)
 
 
-def mark_missing_as_unknown(store: OrderStore, known_refs: set[str]) -> list[str]:
-    """Tras conectar, las órdenes Paper enviadas que IBKR no conoce pasan a UNKNOWN (nunca se reenvían)."""
+def mark_missing_as_unknown(store: OrderStore, known_refs: set[str], mode: str = "paper") -> list[str]:
+    """Tras conectar, las órdenes enviadas que IBKR no conoce pasan a UNKNOWN (nunca se reenvían)."""
     changed = []
-    for order in store.list(mode="paper", is_mock=False, open_only=True):
+    for order in store.list(mode=mode, is_mock=False, open_only=True):
         if order.client_order_id in known_refs:
             continue
         if order.state in (S.SUBMITTING, S.ACKNOWLEDGED, S.PARTIALLY_FILLED):

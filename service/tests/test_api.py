@@ -98,9 +98,12 @@ def test_kill_switch_blocks_new_entries_and_lists_what_remains(client):
     assert client.post("/v1/orders/simulated", json={**ORDER, "client_order_id": "UI-0000002"}).status_code == 201
 
 
-def test_no_route_can_submit_to_a_broker(client):
+def test_only_known_routes_send_to_a_broker(client):
     paths = {r.path for r in client.app.routes}
-    assert not any(word in p for p in paths for word in ("submit", "live", "real", "transmit", "place"))
+    assert not any(word in p for p in paths for word in ("submit", "live", "transmit", "place"))
+    # Las dos únicas rutas que envían: Paper y real. Sin IBKR ambas se niegan.
+    assert client.post("/v1/orders/paper", json={**ORDER, "side": "BUY", "confirmed": True}).status_code == 409
+    assert client.post("/v1/orders/real", json={**ORDER, "side": "BUY", "confirmed": True}).status_code == 409
 
 
 def test_restart_keeps_state_and_does_not_reseed(settings):

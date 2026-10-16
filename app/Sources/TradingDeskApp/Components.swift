@@ -13,7 +13,9 @@ struct HeaderBar: View {
                            tone: status.broker == "conectado" ? .ok : .warning, help: status.brokerDetail)
                 if status.mode == "live" {
                     StatusPill(title: "Cuenta", value: status.modeLabel, systemImage: "eye", tone: .danger,
-                               help: "Cuenta REAL de IBKR en solo lectura: la app no puede enviar órdenes")
+                               help: model.isRealTrading
+                                   ? "Cuenta REAL de IBKR: las órdenes que confirmes usan dinero real"
+                                   : "Cuenta REAL de IBKR en solo lectura: la app no puede enviar órdenes")
                 } else {
                     StatusPill(title: "Modo", value: status.modeLabel, systemImage: "testtube.2", tone: .info,
                                help: "Paper Trading: no se usa dinero real")

@@ -53,7 +53,19 @@ def test_real_account_can_be_chosen_with_a_file_in_the_data_dir(tmp_path):
 @pytest.mark.parametrize("kwargs", [
     {"ib_account": "real"},
     {"ib_account": "real-readonly", "paper_orders": True},
+    {"ib_account": "real-trading", "paper_orders": True},
+    {"ib_account": "real-trading", "paper_orders": False, "max_real_order_eur": __import__("decimal").Decimal("1001")},
 ])
 def test_real_account_never_with_orders(tmp_path, kwargs):
     with pytest.raises(ConfigError):
         Settings(data_dir=tmp_path, data_source="ibkr", **kwargs).validate()
+
+
+def test_real_trading_has_a_euro_cap_of_at_most_1000(tmp_path):
+    s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_ACCOUNT": "real-trading"})
+    assert s.real_trading and s.real_account and not s.paper_orders and s.ib_port == 4001
+    assert s.max_real_order_eur == 1000
+    with pytest.raises(ConfigError):
+        Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_ACCOUNT": "real-trading", "TRADINGDESK_MAX_REAL_ORDER_EUR": "5000"})
