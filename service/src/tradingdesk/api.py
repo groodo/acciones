@@ -13,7 +13,8 @@ import hmac
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -29,6 +30,7 @@ from .db import Database
 from .domain import (
     AccountSnapshot,
     EquityCurve,
+    EquityPoint,
     Envelope,
     Freshness,
     KillSwitchRequest,
@@ -55,6 +57,7 @@ log = logging.getLogger("tradingdesk.api")
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
 CANCELLABLE = {OrderState.DRAFT, OrderState.RISK_APPROVED}
 BROKER_CANCELLABLE = {OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED}
+SNAPSHOT_EVERY = timedelta(minutes=5)
 
 
 def load_or_create_token(path: Path) -> str:
@@ -85,7 +88,9 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     provider = provider or MockProvider()
     orders = OrderStore(db)
     kill_switch = KillSwitch(db)
-    seed_mock_orders(orders, provider.now())
+    if broker is None and settings.data_source != "ibkr":
+        # Las órdenes de ejemplo solo existen en el modo simulado; con IBKR no se mezclan con las reales.
+        seed_mock_orders(orders, provider.now())
     if broker is None and settings.data_source == "ibkr":
         broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id, orders=orders,
                                  orders_enabled=settings.paper_orders and not settings.real_account,
@@ -124,11 +129,21 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         return Envelope(source="IBKR", is_mock=False, mode="live" if settings.real_account else settings.mode,
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
 
+    last_recorded: list[datetime] = []
+
     def broker_snapshot():
         snap = broker.snapshot()
         if snap.link != "conectado" or snap.account is None:
             raise HTTPException(503, snap.detail)
+        # Curva de patrimonio real: un punto cada 5 minutos mientras la app consulta la cuenta.
+        now = datetime.now(timezone.utc)
+        if not last_recorded or now - last_recorded[-1] >= SNAPSHOT_EVERY:
+            _record_snapshot(db, snap.account, source="IBKR")
+            last_recorded[:] = [now]
         return snap
+
+    # Con IBKR todo lo que devuelve el servicio es real: no hay respuestas simuladas.
+    respond = ibkr_envelope if broker is not None else envelope
 
     def quotes_notice(freshness: Freshness) -> str | None:
         if freshness is Freshness.DELAYED:
@@ -167,14 +182,12 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             snap = broker.snapshot()
             if settings.real_account:
                 alerts = ["Cuenta REAL de IBKR en solo lectura: la app no puede enviar ni cancelar órdenes.",
-                          "Las previsiones de Kronos son orientativas; las órdenes de prueba siguen siendo simuladas."]
+                          "Las previsiones de Kronos son orientativas, no una recomendación."]
             elif broker.orders_enabled:
                 alerts = [f"Órdenes Paper habilitadas: solo limitadas, con tu confirmación y un tope de "
-                          f"{settings.max_order_value} por orden. Dinero ficticio.",
-                          "Señales y curva de patrimonio siguen siendo SIMULADAS."]
+                          f"{settings.max_order_value} por orden. Dinero ficticio."]
             else:
-                alerts = ["Cuenta Paper de IBKR en solo lectura: no se envían órdenes al bróker.",
-                          "Señales, curva de patrimonio y órdenes siguen siendo SIMULADAS."]
+                alerts = ["Cuenta Paper de IBKR en solo lectura: no se envían órdenes al bróker."]
             if snap.link != "conectado":
                 alerts.insert(0, snap.detail)
             elif snap.positions and (n := quotes_notice(snap.quotes)):
@@ -227,6 +240,8 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
 
     @app.get("/v1/equity-curve", response_model=Envelope[EquityCurve])
     def equity_curve(range: Literal["hoy", "7d", "30d", "todo"] = "30d"):  # noqa: A002
+        if broker is not None:
+            return ibkr_envelope(_real_equity_curve(db, range, "live" if settings.real_account else "paper"))
         return envelope(provider.equity_curve(range))
 
     @app.get("/v1/signals", response_model=Envelope[list[Signal]])
@@ -236,6 +251,8 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             notice = ("Previsiones de Kronos-small (local). Las frecuencias de las muestras no son probabilidades "
                       "calibradas ni una recomendación.") if st.installed else st.detail
             return ibkr_envelope(engine.signals(), notice)
+        if broker is not None:
+            return ibkr_envelope([], "Este conector de IBKR no da velas: no hay señales.")
         return envelope(provider.signals(),
                         notice=MOCK_NOTICE + " Las señales no proceden de ningún modelo.")
 
@@ -249,16 +266,20 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
 
     @app.get("/v1/orders", response_model=Envelope[list[OrderRecord]])
     def list_orders(open_only: bool = False):
+        if broker is not None:
+            return ibkr_envelope(orders.list(mode=settings.mode, is_mock=False, open_only=open_only))
         return envelope(orders.list(mode=settings.mode, open_only=open_only))
 
     @app.get("/v1/orders/{client_order_id}/events", response_model=Envelope[list[OrderEvent]])
     def order_events(client_order_id: str):
         if orders.get(client_order_id) is None:
             raise HTTPException(404, "Orden no encontrada")
-        return envelope(orders.events(client_order_id))
+        return respond(orders.events(client_order_id))
 
     @app.post("/v1/orders/simulated", response_model=Envelope[OrderRecord], status_code=201)
     def create_simulated(req: SimulatedOrderRequest):
+        if broker is not None:
+            raise HTTPException(409, "Con IBKR conectado no se crean órdenes simuladas.")
         if kill_switch.active:
             raise HTTPException(423, "Operativa detenida: no se aceptan nuevas entradas.")
         try:
@@ -347,29 +368,56 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             active=st["active"],
             reason=st["reason"],
             changed_at=datetime.fromisoformat(st["changed_at"]) if st["changed_at"] else None,
-            open_orders=orders.list(mode=settings.mode, open_only=True),
+            open_orders=orders.list(mode=settings.mode, open_only=True,
+                                    is_mock=False if broker is not None else None),
             open_positions=current_positions(),
             message=("Operativa detenida. Se bloquean nuevas entradas; las órdenes y posiciones listadas "
                      "siguen activas y no se liquidan automáticamente.") if st["active"]
-            else "Operativa habilitada en simulación.",
+            else ("Operativa habilitada." if broker is not None else "Operativa habilitada en simulación."),
         )
 
     @app.get("/v1/kill-switch", response_model=Envelope[KillSwitchState])
     def get_kill_switch():
-        return envelope(kill_switch_view())
+        return respond(kill_switch_view())
 
     @app.post("/v1/kill-switch", response_model=Envelope[KillSwitchState])
     def set_kill_switch(req: KillSwitchRequest):
         kill_switch.set(req.active, req.reason)
         log_event(log, "Kill switch actualizado", active=req.active, reason=req.reason)
-        return envelope(kill_switch_view())
+        return respond(kill_switch_view())
 
     return app
 
 
-def _record_snapshot(db: Database, snapshot: AccountSnapshot) -> None:
+def _record_snapshot(db: Database, snapshot: AccountSnapshot, source: str = "MOCK") -> None:
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO account_snapshots (taken_at, mode, source, is_mock, payload) VALUES (?, ?, 'MOCK', 1, ?)",
-            (snapshot.timestamp.isoformat(), snapshot.mode, snapshot.model_dump_json()),
+            "INSERT INTO account_snapshots (taken_at, mode, source, is_mock, payload) VALUES (?, ?, ?, ?, ?)",
+            (snapshot.timestamp.isoformat(), snapshot.mode, source, int(source == "MOCK"),
+             snapshot.model_dump_json()),
         )
+
+
+def _real_equity_curve(db: Database, range_: str, mode: str, now: datetime | None = None) -> EquityCurve:
+    """Curva con los valores liquidativos reales que ha ido guardando el servicio (sin inventar histórico)."""
+    now = now or datetime.now(timezone.utc)
+    if range_ == "hoy":
+        since = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        since = now - timedelta(days={"7d": 7, "30d": 30, "todo": 36500}[range_])
+    rows = db.query("SELECT taken_at, payload FROM account_snapshots WHERE is_mock = 0 AND mode = ? "
+                    "ORDER BY taken_at", (mode,))
+    points = []
+    for r in rows:
+        taken = datetime.fromisoformat(r["taken_at"])
+        if taken < since:
+            continue
+        snap = AccountSnapshot.model_validate_json(r["payload"])
+        points.append(EquityPoint(timestamp=taken, equity_eur=snap.net_liquidation_eur.amount,
+                                  net_flows_eur=Decimal("0.00")))
+    sufficient = len(points) >= 2
+    message = ("Valor liquidativo de tu cuenta registrado por la app cada 5 minutos mientras está abierta. "
+               "No descuenta ingresos ni retiradas.")
+    if not sufficient:
+        message = "Aún no hay suficientes puntos: la app guarda el valor de tu cuenta cada 5 minutos mientras está abierta."
+    return EquityCurve(range=range_, sufficient=sufficient, message=message, points=points)

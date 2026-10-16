@@ -14,19 +14,21 @@ struct RendimientoView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Rendimiento").font(.title2).bold()
-                Text("Con tres operaciones simuladas la muestra es demasiado pequeña: ninguna métrica es concluyente. "
-                     + "El cálculo real llegará con el ledger y el backtesting (Hitos D y E).")
+                Text(model.isMock
+                     ? "Con tres operaciones simuladas la muestra es demasiado pequeña: ninguna métrica es concluyente."
+                     : "Cifras de tu cuenta según IBKR. Las métricas por operación necesitan un historial de operaciones "
+                       + "que la app aún no registra (ledger y backtesting, Hitos D y E).")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let a = model.account {
                     HStack(spacing: 12) {
-                        MetricCard(title: "Realizado (simulado)", systemImage: "checkmark.seal") {
+                        MetricCard(title: model.isMock ? "Realizado (simulado)" : "Realizado", systemImage: "checkmark.seal") {
                             SignedAmount(money: a.realizedPnl)
                         }
-                        MetricCard(title: "No realizado (simulado)", systemImage: "hourglass") {
+                        MetricCard(title: model.isMock ? "No realizado (simulado)" : "No realizado", systemImage: "hourglass") {
                             SignedAmount(money: a.unrealizedPnl)
                         }
-                        MetricCard(title: "Comisiones (simulado)", systemImage: "creditcard") {
+                        MetricCard(title: model.isMock ? "Comisiones (simulado)" : "Comisiones", systemImage: "creditcard") {
                             Text(Fmt.money(a.realizedFees))
                         }
                     }

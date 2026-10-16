@@ -39,6 +39,7 @@ struct OperacionesView: View {
                 }
                 .disabled(!model.canSendPaperOrders)
                 .help(model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
+                      : model.status?.mode == "live" ? "Cuenta real conectada en solo lectura: no se envían órdenes"
                       : "Requiere IB Gateway conectado en Negociación simulada y la operativa no detenida")
             }
 

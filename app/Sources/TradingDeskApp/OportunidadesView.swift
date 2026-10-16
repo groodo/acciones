@@ -101,17 +101,19 @@ struct SignalDetail: View {
                     .foregroundStyle(.secondary)
 
                 HStack {
-                    Button("Simular compra") { Task { await model.simulateBuy(signal) } }
-                        .disabled(signal.status != .paperReady || model.killSwitch?.active == true)
-                        .help(signal.status == .paperReady ? "Crea un borrador SIMULADO; no se envía a ningún bróker"
-                                                           : "Solo disponible para señales aptas para paper")
+                    if model.isMock {
+                        Button("Simular compra") { Task { await model.simulateBuy(signal) } }
+                            .disabled(signal.status != .paperReady || model.killSwitch?.active == true)
+                            .help(signal.status == .paperReady ? "Crea un borrador SIMULADO; no se envía a ningún bróker"
+                                                               : "Solo disponible para señales aptas para paper")
+                    }
                     Button("Preparar orden Paper…") {
                         model.openPaperOrder(symbol: signal.symbol,
                                              side: signal.proposal == .sellPosition ? "SELL" : "BUY",
                                              price: signal.price?.value)
                     }
                     .disabled(!model.canSendPaperOrders)
-                    .help("Abre una orden limitada en la cuenta Paper. La señal es de ejemplo: revisa el precio.")
+                    .help("Abre una orden limitada en la cuenta Paper. Revisa el precio antes de confirmar.")
                     Button("Descartar") { model.actionMessage = "Señal \(signal.symbol) descartada (solo en esta sesión)." }
                 }
                 // No existe botón de operación REAL: no hay habilitación live en el backend.

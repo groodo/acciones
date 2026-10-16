@@ -193,9 +193,15 @@ def test_api_serves_ibkr_account_labelled_as_real_paper(settings):
         status = c.get("/v1/status").json()["data"]
         assert (status["broker"], status["mode_label"], status["quotes"]) == ("conectado", "PAPER", "diferidas")
         assert status["trading_allowed"] is False
-        # Lo que aún no viene de IBKR sigue etiquetado como simulado.
-        for path in ("/v1/signals", "/v1/equity-curve?range=7d", "/v1/orders"):
-            assert c.get(path).json()["is_mock"] is True
+        # Con IBKR nada se simula: ni señales, ni curva, ni órdenes de ejemplo.
+        for path in ("/v1/signals", "/v1/equity-curve?range=7d", "/v1/orders", "/v1/kill-switch"):
+            assert c.get(path).json()["is_mock"] is False, path
+        assert c.get("/v1/orders").json()["data"] == []
+        assert c.get("/v1/signals").json()["data"] == []
+        curve = c.get("/v1/equity-curve?range=todo").json()["data"]
+        assert [p["equity_eur"] for p in curve["points"]] == ["1012.34"] and curve["sufficient"] is False
+        r = c.post("/v1/orders/simulated", json={"client_order_id": "UI-0000001", "symbol": "MSFT", "quantity": "1", "limit_price": "418"})
+        assert r.status_code == 409
         ks = c.post("/v1/kill-switch", json={"active": True}).json()["data"]
         assert [p["symbol"] for p in ks["open_positions"]] == ["KO"]
     assert fake.stopped

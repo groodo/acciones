@@ -88,9 +88,7 @@ final class AppModel: ObservableObject {
                 flags += [a.isMock, p.isMock]
                 accountUnavailable = nil
                 let cuenta = s.data.mode == "live" ? "tu cuenta REAL de IBKR (solo lectura)" : "cuenta Paper de IBKR"
-                let senales = sg.isMock ? "SIMULADAS" : "Kronos-small"
-                notice = a.isMock ? a.notice
-                    : "Saldo y posiciones: \(cuenta). Señales: \(senales). Curva de patrimonio: DATOS SIMULADOS."
+                notice = a.isMock ? a.notice : "Datos de \(cuenta). Señales: Kronos-small en tu Mac."
             } catch let error as APIError {
                 guard case .http(503, let detail) = error else { throw error }
                 account = nil
