@@ -5,9 +5,8 @@ import TradingDeskCore
 /// Arranca el servicio Python local al abrir la app y lo detiene al salir.
 ///
 /// Si ya hay un servicio escuchando (por ejemplo, lanzado con `scripts/run_service.sh`), se usa ese y no se toca.
-/// El intérprete se busca, por orden, en `TRADINGDESK_SERVICE_PYTHON`, dentro del bundle
-/// (`Contents/Resources/service-runtime`, lo crea `scripts/package_macos.sh`) y en `service/.venv` del repositorio
-/// cuando se ejecuta con `swift run`.
+/// El intérprete se busca, por orden, en `TRADINGDESK_SERVICE_PYTHON`, en `service/.venv` del repositorio (donde se
+/// instala Kronos) y dentro del bundle (`Contents/Resources/service-runtime`, sin Kronos).
 @MainActor
 final class ServiceSupervisor {
     enum Origin: Equatable {
@@ -116,16 +115,17 @@ final class ServiceSupervisor {
         if let custom = env["TRADINGDESK_SERVICE_PYTHON"], fm.isExecutableFile(atPath: custom) {
             return URL(fileURLWithPath: custom)
         }
-        if let resources = Bundle.main.resourceURL {
-            let bundled = resources.appendingPathComponent("service-runtime/bin/python3")
-            if fm.isExecutableFile(atPath: bundled.path) { return bundled }
-        }
-        // `swift run`: el ejecutable está en app/.build/...; se sube hasta encontrar service/.venv.
+        // Primero el entorno del repositorio (service/.venv), que es donde instala Kronos scripts/install_kronos.sh:
+        // sirve tanto con `swift run` como con la app empaquetada en dist/.
         var dir = Bundle.main.executableURL?.deletingLastPathComponent()
         while let current = dir, current.path != "/" {
             let candidate = current.appendingPathComponent("service/.venv/bin/python")
             if fm.isExecutableFile(atPath: candidate.path) { return candidate }
             dir = current.deletingLastPathComponent()
+        }
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources.appendingPathComponent("service-runtime/bin/python3")
+            if fm.isExecutableFile(atPath: bundled.path) { return bundled }
         }
         return nil
     }

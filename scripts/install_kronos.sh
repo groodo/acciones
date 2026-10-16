@@ -39,6 +39,10 @@ echo "Kronos en el commit $COMMIT"
 echo "Instalando dependencias de Kronos en $VENV (puede tardar: incluye PyTorch)…"
 "$VENV/bin/pip" install -r "$KDIR/src/requirements.txt"
 "$VENV/bin/pip" install "huggingface_hub>=0.23" safetensors
+# En Python x86_64 (Rosetta) el último PyTorch es 2.2.x, compilado contra NumPy 1: con NumPy 2 falla al cargar.
+if [ "$("$VENV/bin/python" -c 'import platform; print(platform.machine())')" = "x86_64" ]; then
+  "$VENV/bin/pip" install "numpy<2"
+fi
 
 KDIR="$KDIR" COMMIT="$COMMIT" "$VENV/bin/python" - <<'PY'
 import hashlib, json, os

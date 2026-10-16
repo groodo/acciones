@@ -69,6 +69,12 @@ class SignalEngine:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # Hasta que IB Gateway conecta no hay velas: se espera en lugar de marcar todo «No evaluable»
+            # durante un intervalo completo.
+            ready = getattr(self.source, "ready", None)
+            if ready is not None and not ready():
+                self._stop.wait(5)
+                continue
             try:
                 self.run_once()
             except Exception:  # noqa: BLE001 - el bucle no debe morir

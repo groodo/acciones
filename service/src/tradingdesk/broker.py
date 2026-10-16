@@ -255,6 +255,11 @@ class IbkrPaperBroker:
         with self._lock:
             return self._snapshot
 
+    def ready(self) -> bool:
+        """Conectado y con la cuenta Paper identificada."""
+        ib = self._ib
+        return ib is not None and ib.isConnected() and self._account is not None
+
     def _publish(self, snap: BrokerSnapshot) -> None:
         with self._lock:
             self._snapshot = snap
