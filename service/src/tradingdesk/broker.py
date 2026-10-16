@@ -376,6 +376,25 @@ class IbkrPaperBroker:
         candles = self._call(run, timeout=60)
         return candles, self.snapshot().quotes
 
+    def scan_candidates(self, n: int) -> list[tuple[str, str]]:
+        """Candidatos del escáner de mercado de IBKR en el Nasdaq (más volumen y más subida del día). Solo lectura."""
+        scans = (("HOT_BY_VOLUME", "Volumen inusual hoy en el Nasdaq (escáner de IBKR)"),
+                 ("TOP_PERC_GAIN", "Entre las que más suben hoy en el Nasdaq (escáner de IBKR)"))
+
+        async def run(ib):
+            from ib_async import ScannerSubscription  # noqa: PLC0415
+
+            out: list[tuple[str, str]] = []
+            for code, why in scans:
+                sub = ScannerSubscription(instrument="STK", locationCode="STK.NASDAQ", scanCode=code,
+                                          abovePrice=5, aboveVolume=500_000, numberOfRows=n)
+                for row in await ib.reqScannerDataAsync(sub) or []:
+                    symbol = row.contractDetails.contract.symbol
+                    if symbol and symbol not in {s for s, _ in out}:
+                        out.append((symbol, why))
+            return out
+        return self._call(run, timeout=30)[:n]
+
     def current_positions(self) -> list[Position]:
         return list(self.snapshot().positions)
 

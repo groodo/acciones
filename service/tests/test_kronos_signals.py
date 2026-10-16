@@ -223,3 +223,73 @@ def test_api_serves_kronos_signals_labelled_as_ibkr(settings):
         assert "no son probabilidades" in body["notice"]
         assert c.get("/v1/model").json()["model_id"] == "NeoQuasar/Kronos-small"
     app.state.db.close()
+
+
+class PerSymbolForecaster(FakeForecaster):
+    """Previsión distinta por símbolo: el engine evalúa los símbolos en orden."""
+
+    def __init__(self, pcts):
+        super().__init__()
+        self.pcts = list(pcts)
+
+    def forecast(self, cs, pred_len, samples, bar_minutes):
+        self.calls.append(cs)
+        return result(flat_paths(cs[-1].close, self.pcts.pop(0) if self.pcts else 0.0, n=samples))
+
+
+class ScanSource(FakeSource):
+    def __init__(self, cs, found):
+        super().__init__(cs)
+        self.found = found
+
+    def scan_candidates(self, n):
+        return self.found
+
+
+def test_discovery_uses_ibkr_scanner_and_ranks_buys_first(db):
+    found = [("MSFT", "en tu lista"), ("AMD", "volumen"), ("PLTR", "sube")]
+    # MSFT (tu lista) +0 %, luego AMD +0 % (esperar) y PLTR +2 % (comprar)
+    engine = SignalEngine(db, ScanSource(candles(step=0.01), found), PerSymbolForecaster([0.0, 0.0, 2.0]),
+                          ["MSFT"], clock=lambda: NOW)
+    engine.run_once()
+    opps = engine.opportunities()
+    assert [s.symbol for s in opps] == ["PLTR", "AMD"]  # sin MSFT, que ya está en tu lista
+    assert opps[0].proposal is Proposal.BUY and opps[0].reasons[0] == "sube"
+    assert "escáner" in engine.discovery_detail and engine.last_discovery == NOW
+
+
+def test_discovery_falls_back_to_nasdaq_universe_in_turns(db):
+    from tradingdesk.signal_engine import DISCOVERY_CANDIDATES, NASDAQ_UNIVERSE
+
+    engine = SignalEngine(db, FakeSource(candles(step=0.01)), FakeForecaster(pct=0.0), ["AAPL"], clock=lambda: NOW)
+    first = {s.symbol for s in engine.discover()}
+    second = {s.symbol for s in engine.discover()}
+    assert "AAPL" not in first | second and not first & second
+    assert len(first) <= DISCOVERY_CANDIDATES and first <= set(NASDAQ_UNIVERSE)
+    assert "por turnos" in engine.discovery_detail
+
+
+def test_api_watchlist_and_order_limit_are_configurable(settings):
+    from fastapi.testclient import TestClient
+
+    from tradingdesk.api import create_app
+    from tradingdesk.mock_data import MockProvider
+
+    from conftest import FIXED_NOW, TOKEN
+
+    app = create_app(settings, token=TOKEN, provider=MockProvider(now=FIXED_NOW))
+    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        assert c.put("/v1/watchlist", json={"symbols": ["tsla", "AMD", "AMD"]}).json()["symbols"] == ["TSLA", "AMD"]
+        assert c.get("/v1/watchlist").json()["symbols"] == ["TSLA", "AMD"]
+        assert c.put("/v1/watchlist", json={"symbols": []}).status_code == 422
+        assert c.put("/v1/watchlist", json={"symbols": ["NO VALE"]}).status_code == 422
+        assert c.put("/v1/order-limit", json={"max_real_order_eur": "250"}).json()["max_real_order_eur"] == "250.00"
+        assert c.get("/v1/order-limit").json()["max_real_order_eur"] == "250.00"
+        assert c.put("/v1/order-limit", json={"max_real_order_eur": "1500"}).status_code == 422
+    app.state.db.close()
+    # Se conserva tras reiniciar.
+    app = create_app(settings, token=TOKEN, provider=MockProvider(now=FIXED_NOW))
+    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        assert c.get("/v1/watchlist").json()["symbols"] == ["TSLA", "AMD"]
+        assert c.get("/v1/order-limit").json()["max_real_order_eur"] == "250.00"
+    app.state.db.close()

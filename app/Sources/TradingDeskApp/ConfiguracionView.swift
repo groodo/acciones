@@ -3,6 +3,8 @@ import TradingDeskCore
 
 struct ConfiguracionView: View {
     @EnvironmentObject var model: AppModel
+    @State private var capText = ""
+    @State private var capMessage: String?
 
     var body: some View {
         Form {
@@ -33,8 +35,28 @@ struct ConfiguracionView: View {
                 } else {
                     LabeledContent("Órdenes", value: "No habilitadas")
                 }
-                Text("Las órdenes son siempre limitadas y solo salen tras tu confirmación. Con la cuenta real, el tope "
-                     + "por orden se fija en el servicio y no puede superar los 1000 €.")
+                if let limit = model.orderLimit {
+                    HStack {
+                        TextField("Tope por orden real (€)", text: $capText)
+                            .frame(width: 160)
+                        Button("Guardar tope") {
+                            let value = Decimal(string: capText.replacingOccurrences(of: ",", with: "."),
+                                                locale: Locale(identifier: "en_US_POSIX"))
+                            Task {
+                                if let value {
+                                    capMessage = await model.saveOrderLimit(value) ?? "Tope guardado: \(capText) € por orden."
+                                } else {
+                                    capMessage = "Escribe un importe, p. ej. 500."
+                                }
+                            }
+                        }
+                    }
+                    .onAppear { capText = limit.maxRealOrderEur }
+                    Text("Tope actual: \(limit.maxRealOrderEur) € por orden real (máximo permitido: \(limit.ceilingEur) €).")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let capMessage { Text(capMessage).font(.caption) }
+                }
+                Text("Las órdenes son siempre limitadas y solo salen tras tu confirmación.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modelo") {

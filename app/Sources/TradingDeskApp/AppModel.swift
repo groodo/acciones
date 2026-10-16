@@ -33,6 +33,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var curve: EquityCurve?
     @Published private(set) var killSwitch: KillSwitchState?
     @Published private(set) var modelStatus: ModelStatus?
+    @Published private(set) var opportunities: [Signal] = []
+    @Published private(set) var opportunitiesNotice: String?
+    @Published private(set) var watchlist: [String] = []
+    @Published private(set) var orderLimit: OrderLimit?
     @Published var curveRange: String = "30d"
     /// Verdadero si alguna de las respuestas mostradas está marcada como simulada por el servicio.
     @Published private(set) var isMock = true
@@ -103,6 +107,12 @@ final class AppModel: ObservableObject {
             curve = c.data
             // El estado de Kronos es informativo: si falla, no se tumba el resto de la pantalla.
             modelStatus = try? await client.modelStatus()
+            if let opp = try? await client.opportunities() {
+                opportunities = opp.data
+                opportunitiesNotice = opp.notice
+            }
+            if let w = try? await client.watchlist() { watchlist = w.symbols }
+            orderLimit = try? await client.orderLimit()
             isMock = flags.contains(true)
             serviceError = nil
             lastRefresh = Date()
@@ -182,6 +192,28 @@ final class AppModel: ObservableObject {
                 ? "Orden REAL \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero real."
                 : "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
             paperOrderDraft = nil
+            await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Guarda tu lista de seguimiento. Devuelve nil si fue bien, o el motivo del rechazo.
+    func saveWatchlist(_ symbols: [String]) async -> String? {
+        do {
+            watchlist = try await client.setWatchlist(symbols).symbols
+            actionMessage = "Lista actualizada: Kronos la analizará en el próximo ciclo (cada 5 minutos)."
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Cambia el tope por orden real (en euros).
+    func saveOrderLimit(_ eur: Decimal) async -> String? {
+        do {
+            orderLimit = try await client.setOrderLimit(eur: eur)
             await refresh()
             return nil
         } catch {

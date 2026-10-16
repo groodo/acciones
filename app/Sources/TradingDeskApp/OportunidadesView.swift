@@ -2,18 +2,43 @@ import SwiftUI
 import TradingDeskCore
 
 struct OportunidadesView: View {
+    enum Tab: String, CaseIterable, Identifiable {
+        case mine = "Mi lista"
+        case system = "Recomendadas por el sistema"
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject var model: AppModel
+    @State private var tab: Tab = .mine
     @State private var selection: Signal.ID?
+
+    private var rows: [Signal] { tab == .mine ? model.signals : model.opportunities }
 
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 8) {
-                Text(model.signals.contains { $0.modelVersion != nil } || model.modelStatus?.installed == true
-                     ? "Previsiones de Kronos-small en tu Mac. No son probabilidades calibradas ni una recomendación."
-                     : "Señales de ejemplo: no proceden de ningún modelo.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Table(model.signals, selection: $selection) {
+                Picker("Lista", selection: $tab) {
+                    ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .onChange(of: tab) { _, _ in selection = nil }
+
+                if tab == .mine {
+                    WatchlistEditor()
+                    Text(model.signals.contains { $0.modelVersion != nil } || model.modelStatus?.installed == true
+                         ? "Opinión de Kronos-small sobre tus valores. No son probabilidades calibradas ni una recomendación."
+                         : "Señales de ejemplo: no proceden de ningún modelo.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(model.opportunitiesNotice ?? "El sistema explora el Nasdaq cada 15 minutos.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Table(rows, selection: $selection) {
                     TableColumn("Símbolo") { s in Text(s.symbol).bold() }
                     TableColumn("Precio") { s in Text(s.price.map { Fmt.number($0.value) } ?? "No disponible") }
                     TableColumn("Variación") { s in Text(s.changePct.map { Fmt.signedPercent($0.value) } ?? "—") }
@@ -30,12 +55,19 @@ struct OportunidadesView: View {
                     }
                     TableColumn("Estado") { s in Text(s.status.label) }
                 }
+                .overlay {
+                    if rows.isEmpty {
+                        Text(tab == .mine ? "Añade valores a tu lista para que Kronos los analice."
+                             : "Aún no hay oportunidades: la primera exploración tarda unos minutos.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(16)
             .frame(minWidth: 560)
 
             Group {
-                if let id = selection, let signal = model.signals.first(where: { $0.id == id }) {
+                if let id = selection, let signal = rows.first(where: { $0.id == id }) {
                     SignalDetail(signal: signal)
                 } else {
                     Text("Selecciona una señal para ver su ficha.")
@@ -45,6 +77,54 @@ struct OportunidadesView: View {
             }
             .frame(minWidth: 320, idealWidth: 380)
         }
+    }
+}
+
+/// Añadir y quitar valores de tu lista de seguimiento (máximo 10).
+struct WatchlistEditor: View {
+    @EnvironmentObject var model: AppModel
+    @State private var newSymbol = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(model.watchlist, id: \.self) { symbol in
+                    HStack(spacing: 2) {
+                        Text(symbol).bold()
+                        Button {
+                            save(model.watchlist.filter { $0 != symbol })
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Quitar \(symbol) de tu lista")
+                        .disabled(model.watchlist.count <= 1)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.15), in: Capsule())
+                }
+                TextField("Añadir (p. ej. TSLA)", text: $newSymbol)
+                    .frame(width: 140)
+                    .onSubmit(add)
+                Button("Añadir", action: add)
+                    .disabled(newSymbol.trimmingCharacters(in: .whitespaces).isEmpty || model.watchlist.count >= 10)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.caption)
+            }
+        }
+    }
+
+    private func add() {
+        let symbol = newSymbol.trimmingCharacters(in: .whitespaces).uppercased()
+        guard !symbol.isEmpty else { return }
+        save(model.watchlist + [symbol])
+        newSymbol = ""
+    }
+
+    private func save(_ symbols: [String]) {
+        Task { error = await model.saveWatchlist(symbols) }
     }
 }
 

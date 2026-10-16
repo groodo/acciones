@@ -94,6 +94,20 @@ public final class APIClient: Sendable {
     public func orders() async throws -> Envelope<[OrderRecord]> { try await get("/v1/orders") }
     public func killSwitch() async throws -> Envelope<KillSwitchState> { try await get("/v1/kill-switch") }
     public func modelStatus() async throws -> ModelStatus { try await get("/v1/model") }
+    public func opportunities() async throws -> Envelope<[Signal]> { try await get("/v1/opportunities") }
+    public func watchlist() async throws -> Watchlist { try await get("/v1/watchlist") }
+    public func orderLimit() async throws -> OrderLimit { try await get("/v1/order-limit") }
+
+    public func setWatchlist(_ symbols: [String]) async throws -> Watchlist {
+        struct Body: Encodable { let symbols: [String] }
+        return try await send("PUT", "/v1/watchlist", body: try JSON.encoder().encode(Body(symbols: symbols)))
+    }
+
+    public func setOrderLimit(eur: Decimal) async throws -> OrderLimit {
+        struct Body: Encodable { let maxRealOrderEur: String }
+        let body = Body(maxRealOrderEur: NSDecimalNumber(decimal: eur).stringValue)
+        return try await send("PUT", "/v1/order-limit", body: try JSON.encoder().encode(body))
+    }
 
     public func equityCurve(range: String) async throws -> Envelope<EquityCurve> {
         try await get("/v1/equity-curve", query: [URLQueryItem(name: "range", value: range)])

@@ -23,9 +23,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from . import __version__
-from .config import Settings
+from .config import REAL_ORDER_CEILING_EUR, Settings
 from .broker import BrokerAdapter, BrokerUnavailable, IbkrPaperBroker
 from .db import Database
 from .domain import (
@@ -56,10 +57,19 @@ from .paper_orders import (
     check_real_order_value,
 )
 from .model_runner import Forecaster, KronosForecaster
+from .preferences import MAX_WATCHLIST, PreferenceError, Preferences
 from .safety import KillSwitch, market_is_open
 from .signal_engine import SignalEngine
 
 log = logging.getLogger("tradingdesk.api")
+
+class WatchlistRequest(BaseModel):
+    symbols: list[str] = Field(max_length=MAX_WATCHLIST * 2)
+
+
+class OrderLimitRequest(BaseModel):
+    max_real_order_eur: Decimal = Field(gt=0, max_digits=9, decimal_places=2)
+
 
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]", "testserver"}
 CANCELLABLE = {OrderState.DRAFT, OrderState.RISK_APPROVED}
@@ -95,6 +105,10 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     provider = provider or MockProvider()
     orders = OrderStore(db)
     kill_switch = KillSwitch(db)
+    prefs = Preferences(db)
+
+    def real_cap() -> Decimal:
+        return prefs.max_real_order_eur(settings.max_real_order_eur, REAL_ORDER_CEILING_EUR)
     if broker is None and settings.data_source != "ibkr":
         # Las órdenes de ejemplo solo existen en el modo simulado; con IBKR no se mezclan con las reales.
         seed_mock_orders(orders, provider.now())
@@ -108,7 +122,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     engine: SignalEngine | None = None
     forecaster = forecaster or KronosForecaster(settings.kronos_dir)
     if broker is not None and hasattr(broker, "historical_candles"):
-        engine = SignalEngine(db, broker, forecaster, list(settings.watchlist),
+        engine = SignalEngine(db, broker, forecaster, prefs.watchlist(list(settings.watchlist)),
                               interval_s=settings.signal_interval_s)
 
     @asynccontextmanager
@@ -193,7 +207,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             snap = broker.snapshot()
             if settings.real_trading:
                 alerts = [f"CUENTA REAL: órdenes con dinero real. Solo limitadas, con tu confirmación en cada una y "
-                          f"un tope de {settings.max_real_order_eur} € por orden.",
+                          f"un tope de {real_cap()} € por orden.",
                           "Las previsiones de Kronos son orientativas, no una recomendación."]
             elif settings.real_account:
                 alerts = ["Cuenta REAL de IBKR en solo lectura: la app no puede enviar ni cancelar órdenes.",
@@ -218,7 +232,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                 last_update=snap.updated_at or now, kill_switch_active=ks,
                 trading_allowed=broker.orders_enabled and snap.link == "conectado" and not ks,
                 alerts=alerts, service_version=__version__,
-                max_order_value=(Money(amount=settings.max_real_order_eur, currency="EUR") if settings.real_trading
+                max_order_value=(Money(amount=real_cap(), currency="EUR") if settings.real_trading
                                  else Money(amount=settings.max_order_value, currency="USD"))
                 if broker.orders_enabled else None,
             ))
@@ -279,7 +293,48 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         return {"installed": st.installed, "loaded": st.loaded, "model_id": st.model_id, "version": st.version,
                 "device": st.device, "detail": st.detail, "last_latency_ms": st.last_latency_ms,
                 "last_run": engine.last_run.isoformat() if engine and engine.last_run else None,
-                "watchlist": list(settings.watchlist)}
+                "watchlist": engine.watchlist if engine else list(settings.watchlist)}
+
+    @app.get("/v1/opportunities", response_model=Envelope[list[Signal]])
+    def opportunities():
+        """Oportunidades que el sistema encuentra fuera de tu lista (Nasdaq), ordenadas: primero «Comprar»."""
+        if engine is None:
+            return envelope([], notice=MOCK_NOTICE + " Sin IBKR no se exploran oportunidades.")
+        when = engine.last_discovery.astimezone().strftime("%H:%M") if engine.last_discovery else None
+        notice = engine.discovery_detail + (f" Última exploración: {when}." if when else "") + \
+            " Son propuestas del modelo, no una recomendación de inversión."
+        return ibkr_envelope(engine.opportunities(), notice)
+
+    @app.get("/v1/watchlist")
+    def get_watchlist():
+        return {"symbols": engine.watchlist if engine else prefs.watchlist(list(settings.watchlist)),
+                "max": MAX_WATCHLIST}
+
+    @app.put("/v1/watchlist")
+    def put_watchlist(req: WatchlistRequest):
+        try:
+            symbols = prefs.set_watchlist(req.symbols)
+        except PreferenceError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if engine is not None:
+            engine.set_watchlist(symbols)
+        log_event(log, "Lista de seguimiento actualizada", symbols=",".join(symbols))
+        return {"symbols": symbols, "max": MAX_WATCHLIST}
+
+    @app.get("/v1/order-limit")
+    def get_order_limit():
+        return {"max_real_order_eur": str(real_cap()), "ceiling_eur": str(REAL_ORDER_CEILING_EUR),
+                "real_trading": settings.real_trading}
+
+    @app.put("/v1/order-limit")
+    def put_order_limit(req: OrderLimitRequest):
+        try:
+            value = prefs.set_max_real_order_eur(req.max_real_order_eur, REAL_ORDER_CEILING_EUR)
+        except PreferenceError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        log_event(log, "Tope por orden real actualizado", max_eur=str(value))
+        return {"max_real_order_eur": str(value), "ceiling_eur": str(REAL_ORDER_CEILING_EUR),
+                "real_trading": settings.real_trading}
 
     @app.get("/v1/orders", response_model=Envelope[list[OrderRecord]])
     def list_orders(open_only: bool = False):
@@ -344,8 +399,9 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         try:
             if live:
                 check_order_limits(req, positions=snap.positions, max_order_value=req.quantity * req.limit_price)
-                value_eur = check_real_order_value(req, snap.account, settings.max_real_order_eur)
-                limit_text = f"importe {value_eur:.2f} € ≤ {settings.max_real_order_eur} €"
+                cap = real_cap()
+                value_eur = check_real_order_value(req, snap.account, cap)
+                limit_text = f"importe {value_eur:.2f} € ≤ {cap} €"
             else:
                 check_order_limits(req, positions=snap.positions, max_order_value=settings.max_order_value)
                 limit_text = f"importe ≤ {settings.max_order_value}"

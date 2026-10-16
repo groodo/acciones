@@ -1,7 +1,12 @@
 # Cómo analiza y propone Kronos
 
-1. **Qué acciones.** La lista de seguimiento (`TRADINGDESK_WATCHLIST`, por defecto AAPL, MSFT,
-   NVDA, KO y SPY; máximo 10). Cada 5 minutos se analiza cada una.
+1. **Qué acciones.**
+   - **Mi lista**: los valores que eliges en Oportunidades (máximo 10; al principio AAPL, MSFT,
+     NVDA, KO y SPY). Kronos da su opinión sobre cada uno cada 5 minutos.
+   - **Recomendadas por el sistema**: cada 15 minutos el escáner de mercado de IBKR busca en el
+     Nasdaq los valores con volumen inusual y los que más suben; los 15 primeros pasan por Kronos
+     y se muestran los 10 mejores, primero los de «Comprar». Si el escáner no responde, se revisan
+     por turnos 50 grandes valores del Nasdaq.
 2. **Qué datos.** Velas de 5 minutos de la sesión regular de los últimos 5 días que da IB Gateway
    (apertura, máximo, mínimo, cierre y volumen). Hacen falta al menos 120 velas cerradas y recientes.
 3. **Qué hace Kronos-small.** Con las últimas velas (hasta 500) genera 8 trayectorias posibles de

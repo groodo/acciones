@@ -296,6 +296,19 @@ public struct PaperOrderRequest: Encodable, Sendable {
     }
 }
 
+/// Tu lista de seguimiento (`/v1/watchlist`).
+public struct Watchlist: Codable, Hashable, Sendable {
+    public let symbols: [String]
+    public let max: Int
+}
+
+/// Tope por orden real en euros (`/v1/order-limit`). Los importes llegan como texto decimal.
+public struct OrderLimit: Codable, Hashable, Sendable {
+    public let maxRealOrderEur: String
+    public let ceilingEur: String
+    public let realTrading: Bool
+}
+
 public struct SimulatedOrderRequest: Encodable, Sendable {
     public let clientOrderId: String
     public let symbol: String
