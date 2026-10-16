@@ -400,7 +400,7 @@ class IbkrPaperBroker:
                 # precio > 10 $ y más de 1 millón de acciones negociadas hoy.
                 sub = ScannerSubscription(instrument="STK", locationCode="STK.NASDAQ", scanCode=code,
                                           abovePrice=10, aboveVolume=1_000_000, marketCapAbove=2000,
-                                          numberOfRows=n)
+                                          stockTypeFilter="CORP", numberOfRows=n)  # solo empresas, sin ETF
                 for row in await ib.reqScannerDataAsync(sub) or []:
                     symbol = row.contractDetails.contract.symbol
                     if symbol and symbol not in {s for s, _ in out}:
