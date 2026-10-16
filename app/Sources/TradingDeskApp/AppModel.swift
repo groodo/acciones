@@ -203,9 +203,18 @@ final class AppModel: ObservableObject {
     }
 
     func openProtect(_ position: Position) {
-        let free = Int(truncating: NSDecimalNumber(decimal: position.quantity.value))
+        // Solo acciones enteras: la API de IBKR no admite stops sobre fracciones de acción.
+        let free = Self.wholeShares(position)
+        guard free >= 1 else { return }
         protectDraft = ProtectDraft(symbol: position.symbol, currency: position.currency, maxQuantity: free,
                                     quantity: free, price: position.lastPrice.value)
+    }
+
+    static func wholeShares(_ position: Position) -> Int {
+        var value = position.quantity.value
+        var whole = Decimal()
+        NSDecimalRound(&whole, &value, 0, .down)
+        return Int(truncating: NSDecimalNumber(decimal: whole))
     }
 
     /// Envía la venta de ganancia y el stop de pérdida ya confirmados. Devuelve nil si fue bien.

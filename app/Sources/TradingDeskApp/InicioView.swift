@@ -136,8 +136,10 @@ struct PositionsCard: View {
                     TableColumn("Comisión est.") { p in Text(p.estimatedFee.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
                     TableColumn("") { p in
                         Button("Proteger…") { model.openProtect(p) }
-                            .disabled(!model.canSendPaperOrders || p.stop != nil)
+                            .disabled(!model.canSendPaperOrders || p.stop != nil || AppModel.wholeShares(p) < 1)
                             .help(p.stop != nil ? "Ya tiene venta de protección en IBKR."
+                                  : AppModel.wholeShares(p) < 1
+                                  ? "Menos de una acción entera: IBKR no admite stops sobre fracciones desde la app; ponlo en IBKR."
                                   : "Venta automática al llegar a tu ganancia máxima o a tu pérdida máxima.")
                     }
                 }
