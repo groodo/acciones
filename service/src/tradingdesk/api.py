@@ -13,6 +13,7 @@ import hmac
 import logging
 import os
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -130,6 +131,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
 
     last_recorded: list[datetime] = []
+    record_lock = threading.Lock()
 
     def broker_snapshot():
         snap = broker.snapshot()
@@ -137,9 +139,10 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             raise HTTPException(503, snap.detail)
         # Curva de patrimonio real: un punto cada 5 minutos mientras la app consulta la cuenta.
         now = datetime.now(timezone.utc)
-        if not last_recorded or now - last_recorded[-1] >= SNAPSHOT_EVERY:
-            _record_snapshot(db, snap.account, source="IBKR")
-            last_recorded[:] = [now]
+        with record_lock:  # las peticiones llegan en paralelo: un solo punto por intervalo
+            if not last_recorded or now - last_recorded[-1] >= SNAPSHOT_EVERY:
+                _record_snapshot(db, snap.account, source="IBKR")
+                last_recorded[:] = [now]
         return snap
 
     # Con IBKR todo lo que devuelve el servicio es real: no hay respuestas simuladas.
@@ -412,6 +415,8 @@ def _real_equity_curve(db: Database, range_: str, mode: str, now: datetime | Non
         taken = datetime.fromisoformat(r["taken_at"])
         if taken < since:
             continue
+        if points and points[-1].timestamp == taken:
+            continue  # mismo instante registrado dos veces
         snap = AccountSnapshot.model_validate_json(r["payload"])
         points.append(EquityPoint(timestamp=taken, equity_eur=snap.net_liquidation_eur.amount,
                                   net_flows_eur=Decimal("0.00")))

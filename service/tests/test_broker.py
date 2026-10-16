@@ -253,3 +253,17 @@ def test_api_with_real_account_is_labelled_and_refuses_orders(tmp_path):
         assert r.status_code == 409
     assert not any(call[0] == "submit" for call in fake.calls)
     app.state.db.close()
+
+
+def test_real_equity_curve_ignores_duplicate_instants(tmp_path):
+    from tradingdesk.api import _real_equity_curve, _record_snapshot  # noqa: PLC0415
+    from tradingdesk.db import Database  # noqa: PLC0415
+
+    db = Database(tmp_path / "t.sqlite3")
+    db.migrate()
+    acc = build_account(values(), account_id=ACC, daily_pnl=None, quotes=Freshness.DELAYED, now=FIXED_NOW)
+    _record_snapshot(db, acc, source="IBKR")
+    _record_snapshot(db, acc, source="IBKR")
+    curve = _real_equity_curve(db, "todo", "paper", now=FIXED_NOW)
+    assert len(curve.points) == 1 and curve.sufficient is False
+    db.close()
