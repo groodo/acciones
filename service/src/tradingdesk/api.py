@@ -88,7 +88,8 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     seed_mock_orders(orders, provider.now())
     if broker is None and settings.data_source == "ibkr":
         broker = IbkrPaperBroker(settings.ib_host, settings.ib_port, settings.ib_client_id, orders=orders,
-                                 orders_enabled=settings.paper_orders)
+                                 orders_enabled=settings.paper_orders and not settings.real_account,
+                                 account_kind="real" if settings.real_account else "paper")
     if broker is None:
         _record_snapshot(db, provider.account())
     engine: SignalEngine | None = None
@@ -120,7 +121,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
 
     def ibkr_envelope(data, notice: str | None = None) -> Envelope:
-        return Envelope(source="IBKR", is_mock=False, mode=settings.mode,
+        return Envelope(source="IBKR", is_mock=False, mode="live" if settings.real_account else settings.mode,
                         generated_at=datetime.now(timezone.utc), notice=notice, data=data)
 
     def broker_snapshot():
@@ -164,7 +165,10 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         market_detail = "Sesión regular 9:30–16:00 America/New_York (festivos no contemplados)"
         if broker is not None:
             snap = broker.snapshot()
-            if broker.orders_enabled:
+            if settings.real_account:
+                alerts = ["Cuenta REAL de IBKR en solo lectura: la app no puede enviar ni cancelar órdenes.",
+                          "Las previsiones de Kronos son orientativas; las órdenes de prueba siguen siendo simuladas."]
+            elif broker.orders_enabled:
                 alerts = [f"Órdenes Paper habilitadas: solo limitadas, con tu confirmación y un tope de "
                           f"{settings.max_order_value} por orden. Dinero ficticio.",
                           "Señales y curva de patrimonio siguen siendo SIMULADAS."]
@@ -178,7 +182,9 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             if ks:
                 alerts.append("Operativa detenida: no se aceptan nuevas entradas.")
             return ibkr_envelope(SystemStatus(
-                broker=snap.link, broker_detail=snap.detail, mode=settings.mode, mode_label="PAPER",
+                broker=snap.link, broker_detail=snap.detail,
+                mode="live" if settings.real_account else settings.mode,
+                mode_label="REAL · SOLO LECTURA" if settings.real_account else "PAPER",
                 market="abierto" if is_open else "cerrado", market_detail=market_detail, quotes=snap.quotes,
                 last_update=snap.updated_at or now, kill_switch_active=ks,
                 trading_allowed=broker.orders_enabled and snap.link == "conectado" and not ks,
@@ -269,6 +275,8 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
 
     @app.post("/v1/orders/paper", response_model=Envelope[OrderRecord], status_code=201)
     def create_paper_order(req: PaperOrderRequest):
+        if settings.real_account:
+            raise HTTPException(409, "Cuenta real conectada en solo lectura: la app no envía órdenes.")
         if broker is None or not broker.orders_enabled:
             raise HTTPException(409, "El envío de órdenes Paper no está habilitado (hace falta la fuente IBKR).")
         if kill_switch.active:

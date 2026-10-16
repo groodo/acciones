@@ -11,8 +11,13 @@ struct HeaderBar: View {
                 StatusPill(title: "IBKR", value: status.broker.capitalized,
                            systemImage: status.broker == "conectado" ? "link" : "link.badge.plus",
                            tone: status.broker == "conectado" ? .ok : .warning, help: status.brokerDetail)
-                StatusPill(title: "Modo", value: status.modeLabel, systemImage: "testtube.2", tone: .info,
-                           help: "Paper Trading: no se usa dinero real")
+                if status.mode == "live" {
+                    StatusPill(title: "Cuenta", value: status.modeLabel, systemImage: "eye", tone: .danger,
+                               help: "Cuenta REAL de IBKR en solo lectura: la app no puede enviar órdenes")
+                } else {
+                    StatusPill(title: "Modo", value: status.modeLabel, systemImage: "testtube.2", tone: .info,
+                               help: "Paper Trading: no se usa dinero real")
+                }
                 StatusPill(title: "Mercado", value: status.market.capitalized,
                            systemImage: status.market == "abierto" ? "bell" : "bell.slash",
                            tone: .neutral, help: status.marketDetail)

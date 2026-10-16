@@ -212,3 +212,38 @@ def test_api_without_gateway_shows_no_balances(settings):
         status = c.get("/v1/status").json()["data"]
         assert status["broker"] == "reconectando" and status["alerts"][0].startswith("No se puede")
     app.state.db.close()
+
+
+def test_real_account_broker_cannot_send_orders():
+    b = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                      account_kind="real")
+    assert b.orders_enabled is False
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.submit("UI-00000001")
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.cancel("UI-00000001")
+
+
+def test_api_with_real_account_is_labelled_and_refuses_orders(tmp_path):
+    from tradingdesk.config import Settings  # noqa: PLC0415
+
+    settings = Settings(data_dir=tmp_path, data_source="ibkr", ib_account="real-readonly", paper_orders=False,
+                        ib_port=4001)
+    real_values = [AccountValue("U7654321", v.tag, v.value, v.currency, "") for v in values() if v.account == ACC]
+    acc = build_account(real_values, account_id="U7654321", daily_pnl=None, quotes=Freshness.DELAYED,
+                        now=FIXED_NOW, mode="live")
+    fake = FakeBroker(BrokerSnapshot(link="conectado", detail="IB Gateway cuenta REAL", account=acc,
+                                     quotes=Freshness.DELAYED, updated_at=FIXED_NOW), orders_enabled=True)
+    app, client = ibkr_client(settings, fake)
+    with client as c:
+        body = c.get("/v1/account").json()
+        assert (body["mode"], body["data"]["mode"], body["data"]["account_id_masked"]) == ("live", "live", "U****321")
+        status = c.get("/v1/status").json()["data"]
+        assert (status["mode"], status["mode_label"]) == ("live", "REAL · SOLO LECTURA")
+        assert "solo lectura" in status["alerts"][0]
+        r = c.post("/v1/orders/paper", json={"client_order_id": "UI-00000001", "symbol": "AAPL", "side": "BUY",
+                                              "quantity": "1", "limit_price": "100", "currency": "USD",
+                                              "confirmed": True})
+        assert r.status_code == 409
+    assert not any(call[0] == "submit" for call in fake.calls)
+    app.state.db.close()

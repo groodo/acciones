@@ -84,3 +84,9 @@ Cada respuesta va envuelta en `{source, is_mock, mode, generated_at, notice, dat
 ## Kronos-small (Hito C)
 
 Instalación y reglas de decisión en [docs/hito-c.md](docs/hito-c.md): `scripts/install_kronos.sh` y, con la fuente `ibkr`, las señales salen de Kronos ejecutado en local.
+
+## Cuenta real en solo lectura
+
+Con `TRADINGDESK_IB_ACCOUNT=real-readonly` (o el archivo `ib-account` en la carpeta de
+datos) la app muestra tu cuenta real de IBKR sin poder enviar órdenes. Pasos y
+garantías en [docs/cuenta-real.md](docs/cuenta-real.md).

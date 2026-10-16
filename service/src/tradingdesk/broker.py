@@ -1,11 +1,15 @@
-"""Conexión con IB Gateway (solo cuenta Paper).
+"""Conexión con IB Gateway.
 
-Se leen saldo, posiciones y cotizaciones de la cuenta Paper a través de la TWS
-API oficial (biblioteca ``ib_async``) y, si está habilitado, se envían y cancelan
-órdenes limitadas en esa cuenta. Sin envío habilitado la conexión es
-``readonly=True``. Si la cuenta conectada no es Paper (los identificadores Paper
-empiezan por ``DU``), se desconecta y no reintenta; además se comprueba otra vez
-antes de cada envío.
+Se leen saldo, posiciones y cotizaciones a través de la TWS API oficial
+(biblioteca ``ib_async``). Hay dos tipos de conexión:
+
+- Paper (por defecto): si está habilitado, se envían y cancelan órdenes limitadas.
+  Si la cuenta conectada no es Paper (los identificadores Paper empiezan por
+  ``DU``), se desconecta y no reintenta; además se comprueba otra vez antes de
+  cada envío.
+- Real en solo lectura (``account_kind="real"``): la conexión es siempre
+  ``readonly=True`` y el envío de órdenes queda desactivado sin posibilidad de
+  activarlo (``submit`` además exige cuenta Paper).
 
 La API de IB es asíncrona; se ejecuta en un hilo propio con su bucle de eventos
 y publica instantáneas inmutables que la API HTTP lee sin bloquear.
@@ -112,7 +116,7 @@ class BrokerAdapter(Protocol):
 
 
 def build_account(values: Iterable, *, account_id: str, daily_pnl: Decimal | None, quotes: Freshness,
-                  now: datetime) -> AccountSnapshot:
+                  now: datetime, mode: Literal["paper", "live"] = "paper") -> AccountSnapshot:
     """Construye ``AccountSnapshot`` a partir de ``AccountValue`` (account, tag, value, currency)."""
     base: dict[str, Decimal] = {}
     base_currency = None
@@ -160,7 +164,7 @@ def build_account(values: Iterable, *, account_id: str, daily_pnl: Decimal | Non
     unrealized = base.get("UnrealizedPnL", Decimal("0"))
     return AccountSnapshot(
         account_id_masked=mask_account(account_id),
-        mode="paper",
+        mode=mode,
         timestamp=now,
         base_currency=base_currency,
         net_liquidation=Money(amount=_q(nlv), currency=base_currency),
@@ -238,10 +242,12 @@ class IbkrPaperBroker:
     """
 
     def __init__(self, host: str, port: int, client_id: int, *, orders: OrderStore | None = None,
-                 orders_enabled: bool = False):
+                 orders_enabled: bool = False, account_kind: Literal["paper", "real"] = "paper"):
         self.host, self.port, self.client_id = host, port, client_id
         self.orders = orders
-        self.orders_enabled = orders_enabled and orders is not None
+        self.account_kind = account_kind
+        # Cuenta real: solo lectura, sin excepción.
+        self.orders_enabled = orders_enabled and orders is not None and account_kind == "paper"
         self._lock = threading.Lock()
         self._snapshot = BrokerSnapshot(link="desconectado", detail="Conectando con IB Gateway…")
         self._stop = threading.Event()
@@ -256,7 +262,7 @@ class IbkrPaperBroker:
             return self._snapshot
 
     def ready(self) -> bool:
-        """Conectado y con la cuenta Paper identificada."""
+        """Conectado y con la cuenta identificada."""
         ib = self._ib
         return ib is not None and ib.isConnected() and self._account is not None
 
@@ -390,7 +396,9 @@ class IbkrPaperBroker:
                 await ib.connectAsync(self.host, self.port, clientId=self.client_id,
                                       readonly=not self.orders_enabled, timeout=8, fetchFields=fetch)
                 accounts = ib.managedAccounts()
-                if not accounts or not all(is_paper_account(a) for a in accounts):
+                if not accounts:
+                    raise ConnectionError("IB Gateway no ha indicado ninguna cuenta")
+                if self.account_kind == "paper" and not all(is_paper_account(a) for a in accounts):
                     raise NotPaperAccountError(
                         "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: esta versión solo "
                         "admite Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
@@ -400,7 +408,7 @@ class IbkrPaperBroker:
                     self._watch_orders(ib)
                 self._ib = ib
                 log_event(log, "Conectado a IB Gateway", port=self.port, account=accounts[0],
-                          orders=self.orders_enabled)
+                          kind=self.account_kind, orders=self.orders_enabled)
                 await self._poll(ib, accounts[0])
             except NotPaperAccountError as exc:
                 log_event(log, "Cuenta no Paper: conexión rechazada", logging.ERROR)
@@ -409,8 +417,9 @@ class IbkrPaperBroker:
                 return
             except Exception as exc:  # noqa: BLE001 - cualquier fallo de red se reintenta
                 log_event(log, "Sin conexión con IB Gateway", logging.WARNING, error=str(exc), port=self.port)
+                session = "de tu cuenta real" if self.account_kind == "real" else "Paper"
                 detail = (f"No se puede conectar con IB Gateway en {self.host}:{self.port}. Comprueba que está "
-                          "abierto, con la sesión Paper iniciada y la API activada.")
+                          f"abierto, con la sesión {session} iniciada y la API activada.")
                 self._publish(BrokerSnapshot(link="reconectando" if attempt else "desconectado", detail=detail))
             finally:
                 self._ib = None
@@ -486,15 +495,17 @@ class IbkrPaperBroker:
             freshness = overall_freshness(quotes.values())
             now = datetime.now(timezone.utc)
             mode = "conexión con envío de órdenes Paper" if self.orders_enabled else "conexión de solo lectura"
+            label = "cuenta REAL" if self.account_kind == "real" else "Paper"
             try:
                 account = build_account(ib.accountValues(account_id), account_id=account_id,
-                                        daily_pnl=to_decimal(pnl.dailyPnL), quotes=freshness, now=now)
+                                        daily_pnl=to_decimal(pnl.dailyPnL), quotes=freshness, now=now,
+                                        mode="paper" if is_paper_account(account_id) else "live")
             except ValueError as exc:
                 self._publish(BrokerSnapshot(link="conectado", detail=str(exc), quotes=freshness, updated_at=now))
             else:
                 self._publish(BrokerSnapshot(
                     link="conectado",
-                    detail=f"IB Gateway Paper ({self.host}:{self.port}), {mode}",
+                    detail=f"IB Gateway {label} ({self.host}:{self.port}), {mode}",
                     account=account,
                     positions=build_positions(items, quotes),
                     quotes=freshness,
