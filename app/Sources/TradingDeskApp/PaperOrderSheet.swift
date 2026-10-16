@@ -32,6 +32,22 @@ struct PaperOrderSheet: View {
         return nil
     }
 
+    private var protection: Protection? { price.flatMap { draft.protection(entry: $0) } }
+
+    private var protectionProblem: String? {
+        guard draft.side == "BUY", draft.protect else { return nil }
+        if draft.gainPct <= 0 || draft.gainPct > 50 { return "La ganancia máxima debe estar entre 0 y 50 %." }
+        if draft.lossPct <= 0 || draft.lossPct > 50 { return "La pérdida máxima debe estar entre 0 y 50 %." }
+        return nil
+    }
+
+    private var protectionText: String {
+        guard let protection, let price else { return "" }
+        return " Al ejecutarse, venta automática a \(Fmt.money(protection.takeProfit, currency: "USD")) "
+            + "(+\(Fmt.money(protection.maxGain(entry: price, quantity: draft.quantity), currency: "USD"))) o stop a "
+            + "\(Fmt.money(protection.stopLoss, currency: "USD")) (−\(Fmt.money(protection.maxLoss(entry: price, quantity: draft.quantity), currency: "USD")))."
+    }
+
     private var sideLabel: String { draft.side == "BUY" ? "COMPRAR" : "VENDER" }
     private var real: Bool { model.isRealTrading }
     private var accountText: String { real ? "CUENTA REAL: dinero real." : "Cuenta Paper: dinero ficticio." }
@@ -64,6 +80,19 @@ struct PaperOrderSheet: View {
                 if let cap {
                     LabeledContent("Tope por orden", value: Fmt.money(cap))
                 }
+                if draft.side == "BUY" {
+                    Toggle("Venta automática con ganancia y pérdida máximas", isOn: $draft.protect)
+                    if draft.protect {
+                        TextField("Ganancia máxima (%)", value: $draft.gainPct, format: .number)
+                        TextField("Pérdida máxima (%)", value: $draft.lossPct, format: .number)
+                        if let protection, let price {
+                            LabeledContent("Vende con ganancia a",
+                                           value: "\(Fmt.money(protection.takeProfit, currency: "USD")) · +\(Fmt.money(protection.maxGain(entry: price, quantity: draft.quantity), currency: "USD"))")
+                            LabeledContent("Stop de pérdida a",
+                                           value: "\(Fmt.money(protection.stopLoss, currency: "USD")) · −\(Fmt.money(protection.maxLoss(entry: price, quantity: draft.quantity), currency: "USD"))")
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
 
@@ -71,7 +100,14 @@ struct PaperOrderSheet: View {
                  + "cerrado, la orden espera a la apertura.")
                 .font(.caption).foregroundStyle(.secondary)
 
-            if let message = error ?? problem {
+            if draft.side == "BUY" && draft.protect {
+                Text("Las dos ventas quedan en IBKR (aunque cierres la app) hasta que se ejecute una; entonces IBKR cancela "
+                     + "la otra. El stop vende a mercado: en una caída brusca puede vender algo por debajo. Solo actúan en "
+                     + "horario normal.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let message = error ?? problem ?? protectionProblem {
                 Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             }
 
@@ -82,7 +118,7 @@ struct PaperOrderSheet: View {
                 if sending { ProgressView().controlSize(.small) }
                 Button("Revisar y enviar…") { error = nil; confirming = true }
                     .buttonStyle(.borderedProminent)
-                    .disabled(problem != nil || sending || !model.canSendPaperOrders)
+                    .disabled(problem != nil || protectionProblem != nil || sending || !model.canSendPaperOrders)
             }
         }
         .padding(20)
@@ -104,7 +140,7 @@ struct PaperOrderSheet: View {
             Button("Volver", role: .cancel) {}
         } message: {
             Text("\(sideLabel) \(draft.quantity) \(draft.symbol) con límite \(price.map { Fmt.money($0, currency: "USD") } ?? "—"). "
-                 + "Importe máximo \(total.map { Fmt.money($0, currency: "USD") } ?? "—"). \(accountText)")
+                 + "Importe máximo \(total.map { Fmt.money($0, currency: "USD") } ?? "—").\(protectionText) \(accountText)")
         }
     }
 }

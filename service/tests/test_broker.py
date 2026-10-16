@@ -113,12 +113,14 @@ def test_orders_only_go_out_through_submit_and_readonly_otherwise():
     tree = ast.parse(source)
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
     assert not {c.func.attr for c in calls} & {"reqGlobalCancel", "bracketOrder", "oneCancelsAll", "whatIfOrder"}
-    assert sum(c.func.attr == "placeOrder" for c in calls) == 1
+    # Solo dos caminos envían órdenes: la orden suelta y el grupo con ganancia/pérdida.
+    assert sum(c.func.attr == "placeOrder" for c in calls) == 2
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "IbkrPaperBroker")
-    submit = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "submit")
-    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(submit))
-    assert "self._account_matches()" in ast.get_source_segment(source, submit)
-    assert "order.mode != self.order_mode" in ast.get_source_segment(source, submit)
+    for name, mode_check in (("submit", "order.mode != self.order_mode"), ("submit_protected", "r.mode != self.order_mode")):
+        fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+        assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(fn))
+        text = ast.get_source_segment(source, fn)
+        assert "self._account_matches()" in text and mode_check in text and "if not self.orders_enabled" in text
     connect = next(c for c in calls if c.func.attr == "connectAsync")
     readonly = next(k for k in connect.keywords if k.arg == "readonly")
     assert ast.unparse(readonly.value) == "not self.orders_enabled"
@@ -151,6 +153,9 @@ class FakeBroker:
 
     def submit(self, client_order_id):
         self.calls.append(("submit", client_order_id))
+
+    def submit_protected(self, take_profit_id, stop_loss_id, parent_id=None):
+        self.calls.append(("protect", parent_id, take_profit_id, stop_loss_id))
 
     def cancel(self, client_order_id):
         self.calls.append(("cancel", client_order_id))

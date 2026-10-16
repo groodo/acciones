@@ -357,6 +357,58 @@ class IbkrPaperBroker:
                       mode=self.order_mode)
         self._call(run)
 
+    def submit_protected(self, take_profit_id: str, stop_loss_id: str, parent_id: str | None = None) -> None:
+        """Envía las ventas de ganancia (limitada) y pérdida (stop) enlazadas: si se ejecuta una, IBKR cancela la otra.
+
+        Con ``parent_id`` es una orden bracket: la compra limitada y las dos ventas, que IBKR solo activa
+        cuando la compra se ejecuta. Sin él, protegen acciones que ya tienes (grupo OCA). Las ventas son GTC
+        (siguen en IBKR días después, aunque la app esté cerrada) y solo actúan en horario normal.
+        """
+        if not self.orders_enabled:
+            raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
+        ids = [i for i in (parent_id, take_profit_id, stop_loss_id) if i]
+
+        async def run(ib):
+            from ib_async import LimitOrder, StopOrder
+
+            if not self._account_matches():
+                raise NotPaperAccountError("La cuenta conectada no es la configurada: no se envía.")
+            records = [self.orders.get(i) for i in ids]
+            if any(r is None or r.is_mock or r.mode != self.order_mode or r.state is not OrderState.RISK_APPROVED
+                   for r in records):
+                raise BrokerUnavailable("La orden no está lista para enviarse.")
+            tp, sl = records[-2], records[-1]
+            contract = await self._qualify(ib, tp.symbol, tp.currency)
+            ib_orders = []
+            if parent_id:
+                parent = records[0]
+                ib_orders.append(LimitOrder(parent.side.value, float(parent.quantity), float(parent.limit_price),
+                                            account=self._account, orderRef=parent_id, tif="DAY",
+                                            orderId=ib.client.getReqId(), transmit=False))
+            link = {"parentId": ib_orders[0].orderId} if parent_id else {"ocaGroup": f"OCA-{take_profit_id}", "ocaType": 1}
+            ib_orders.append(LimitOrder("SELL", float(tp.quantity), float(tp.limit_price), account=self._account,
+                                        orderRef=take_profit_id, tif="GTC", orderId=ib.client.getReqId(),
+                                        transmit=False, **link))
+            # El último lleva transmit=True: IBKR recibe el grupo entero de una vez.
+            ib_orders.append(StopOrder("SELL", float(sl.quantity), float(sl.limit_price), account=self._account,
+                                       orderRef=stop_loss_id, tif="GTC", orderId=ib.client.getReqId(),
+                                       transmit=True, **link))
+            for client_order_id in ids:
+                self.orders.transition(client_order_id, OrderState.SUBMITTING,
+                                       "Enviando a IBKR (cuenta REAL)" if self.order_mode == "live" else "Enviando a IBKR Paper")
+            for client_order_id, ib_order in zip(ids, ib_orders):
+                try:
+                    trade = ib.placeOrder(contract, ib_order)
+                except Exception as exc:
+                    # No sabemos qué llegó: todo el grupo a UNKNOWN y nunca se reenvía solo.
+                    for i in ids:
+                        if self.orders.get(i).state is OrderState.SUBMITTING:
+                            self.orders.transition(i, OrderState.UNKNOWN, f"Error al enviar: {exc}")
+                    raise
+                self.orders.set_broker_ids(client_order_id, trade.order.orderId, trade.order.permId or None)
+            log_event(log, "Órdenes de protección enviadas", orders=ids, mode=self.order_mode)
+        self._call(run)
+
     def cancel(self, client_order_id: str) -> None:
         if not self.orders_enabled:
             raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")

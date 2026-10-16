@@ -27,6 +27,58 @@ class PaperOrderRequest(BaseModel):
     currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     # La app solo lo envía tras la confirmación explícita del usuario.
     confirmed: bool = False
+    # Opcional, solo en compras: al ejecutarse, IBKR deja dos ventas enlazadas (si se ejecuta una, cancela la otra).
+    take_profit_price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=4)
+    stop_loss_price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=4)
+
+    @property
+    def protected(self) -> bool:
+        return self.take_profit_price is not None or self.stop_loss_price is not None
+
+
+class ProtectRequest(BaseModel):
+    """Venta de ganancia máxima y stop de pérdida máxima para acciones que ya tienes."""
+
+    client_order_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_\-]+$")
+    symbol: str = Field(min_length=1, max_length=12, pattern=r"^[A-Z.]+$")
+    quantity: Decimal = Field(gt=0, max_digits=8, decimal_places=0)
+    take_profit_price: Decimal = Field(gt=0, max_digits=12, decimal_places=4)
+    stop_loss_price: Decimal = Field(gt=0, max_digits=12, decimal_places=4)
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    confirmed: bool = False
+
+
+MAX_PROTECTION_DISTANCE = Decimal("0.5")  # ±50 % del precio: más lejos es casi seguro un error al teclear
+
+
+def protection_ids(client_order_id: str) -> tuple[str, str]:
+    """Identificadores de la venta de ganancia (TP) y del stop (SL) que cuelgan de una orden."""
+    base = client_order_id[:60]
+    return f"{base}-TP", f"{base}-SL"
+
+
+def check_protection_prices(entry: Decimal, take_profit: Decimal | None, stop_loss: Decimal | None) -> None:
+    """La venta de ganancia va por encima de ``entry`` y el stop por debajo, ambos a menos de un 50 %."""
+    if take_profit is None or stop_loss is None:
+        raise RiskRejection("Indica los dos precios: el de ganancia máxima y el de pérdida máxima.")
+    if take_profit <= entry:
+        raise RiskRejection(f"El precio de ganancia ({take_profit}) tiene que estar por encima de {entry}.")
+    if stop_loss >= entry:
+        raise RiskRejection(f"El precio de pérdida máxima ({stop_loss}) tiene que estar por debajo de {entry}.")
+    if take_profit > entry * (1 + MAX_PROTECTION_DISTANCE) or stop_loss < entry * (1 - MAX_PROTECTION_DISTANCE):
+        raise RiskRejection("Los precios de ganancia y pérdida deben estar a menos de un 50 % del precio de entrada.")
+
+
+def free_shares(symbol: str, currency: str, positions: list[Position], open_orders) -> Decimal:
+    """Acciones que tienes y que no están ya comprometidas en otra venta abierta."""
+    held = sum((p.quantity for p in positions if p.symbol == symbol and p.currency == currency), Decimal("0"))
+    committed: dict[str, Decimal] = {}
+    for o in open_orders:
+        if o.symbol == symbol and o.currency == currency and o.side is OrderSide.SELL:
+            # La venta de ganancia y su stop venden las mismas acciones: cuentan una vez por grupo.
+            group = o.client_order_id.removesuffix("-TP").removesuffix("-SL")
+            committed[group] = max(committed.get(group, Decimal("0")), o.quantity - o.filled_quantity)
+    return held - sum(committed.values(), Decimal("0"))
 
 
 class RiskRejection(Exception):

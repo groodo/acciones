@@ -85,6 +85,13 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        ALTER TABLE orders ADD COLUMN order_type TEXT NOT NULL DEFAULT 'LMT';
+        ALTER TABLE orders ADD COLUMN parent_client_order_id TEXT;
+        """,
+    ),
 ]
 
 

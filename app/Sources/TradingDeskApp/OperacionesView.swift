@@ -77,9 +77,9 @@ struct OrdersTable: View {
             }
             TableColumn("Origen") { (o: OrderRecord) in Text(o.isMock ? "SIMULADA" : o.mode.uppercased()) }
             TableColumn("Símbolo") { (o: OrderRecord) in Text(o.symbol) }
-            TableColumn("Lado") { (o: OrderRecord) in Text(o.side == "BUY" ? "Compra" : "Venta") }
+            TableColumn("Lado") { (o: OrderRecord) in Text(o.sideLabel) }
             TableColumn("Unidades") { (o: OrderRecord) in Text(Self.units(o)) }
-            TableColumn("Límite") { (o: OrderRecord) in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
+            TableColumn("Límite / stop") { (o: OrderRecord) in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
             TableColumn("Precio medio") { (o: OrderRecord) in Text(Self.avgPrice(o)) }
             TableColumn("Comisión") { (o: OrderRecord) in Text(o.commission.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
             TableColumn("Estado") { (o: OrderRecord) in Text(o.state.label) }

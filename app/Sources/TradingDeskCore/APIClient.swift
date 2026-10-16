@@ -109,6 +109,11 @@ public final class APIClient: Sendable {
         return try await send("PUT", "/v1/order-limit", body: try JSON.encoder().encode(body))
     }
 
+    /// Venta de ganancia máxima + stop de pérdida máxima para acciones que ya tienes (en IBKR, enlazadas).
+    public func protectPosition(_ request: ProtectRequest) async throws -> Envelope<[OrderRecord]> {
+        try await send("POST", "/v1/orders/protect", body: try JSON.encoder().encode(request))
+    }
+
     public func dataProvider() async throws -> DataProvider { try await get("/v1/data-provider") }
 
     /// Envía las claves de Alpaca al servicio local, que las comprueba y las guarda; nunca las devuelve.

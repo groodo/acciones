@@ -134,6 +134,12 @@ struct PositionsCard: View {
                         Text("\(p.stop.map { Fmt.number($0.value) } ?? "—") / \(p.target.map { Fmt.number($0.value) } ?? "—")")
                     }
                     TableColumn("Comisión est.") { p in Text(p.estimatedFee.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
+                    TableColumn("") { p in
+                        Button("Proteger…") { model.openProtect(p) }
+                            .disabled(!model.canSendPaperOrders || p.stop != nil)
+                            .help(p.stop != nil ? "Ya tiene venta de protección en IBKR."
+                                  : "Venta automática al llegar a tu ganancia máxima o a tu pérdida máxima.")
+                    }
                 }
                 .frame(minHeight: 140)
             }

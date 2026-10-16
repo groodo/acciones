@@ -40,6 +40,7 @@ from .domain import (
     KillSwitchState,
     Money,
     OrderEvent,
+    OrderSide,
     OrderRecord,
     OrderState,
     Position,
@@ -52,7 +53,11 @@ from .mock_data import MOCK_NOTICE, MockProvider, seed_mock_orders
 from .orders import OrderError, OrderStore
 from .paper_orders import (
     PaperOrderRequest,
+    ProtectRequest,
     RiskRejection,
+    check_protection_prices,
+    free_shares,
+    protection_ids,
     check_order_limits,
     check_price_band,
     check_real_order_value,
@@ -282,7 +287,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
     def positions():
         if broker is not None:
             snap = broker_snapshot()
-            return ibkr_envelope(snap.positions, quotes_notice(snap.quotes) if snap.positions else None)
+            return ibkr_envelope(with_protection(snap.positions), quotes_notice(snap.quotes) if snap.positions else None)
         return envelope(provider.positions())
 
     @app.get("/v1/equity-curve", response_model=Envelope[EquityCurve])
@@ -426,6 +431,109 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             raise HTTPException(409, "El conector de IBKR no tiene habilitadas las órdenes reales.")
         return place_order(req, live=True)
 
+    def protective_orders(mode: str) -> list[OrderRecord]:
+        """Ventas abiertas que de verdad comprometen acciones (las de una compra aún sin ejecutar no cuentan)."""
+        open_orders = orders.list(mode=mode, is_mock=False, open_only=True)
+        pending_parents = {o.client_order_id for o in open_orders if o.side is OrderSide.BUY and o.filled_quantity == 0}
+        return [o for o in open_orders if o.parent_client_order_id not in pending_parents]
+
+    def with_protection(positions: list[Position]) -> list[Position]:
+        """Rellena «stop / objetivo» de cada posición con sus ventas de protección abiertas en IBKR."""
+        if broker is None or not positions:
+            return positions
+        mode = "live" if settings.real_account else "paper"
+        sells = [o for o in protective_orders(mode) if o.side is OrderSide.SELL]
+        out = []
+        for p in positions:
+            mine = [o for o in sells if o.symbol == p.symbol and o.currency == p.currency]
+            stops = [o.limit_price for o in mine if o.order_type == "STP"]
+            targets = [o.limit_price for o in mine if o.order_type == "LMT" and o.client_order_id.endswith("-TP")]
+            out.append(p.model_copy(update={"stop": max(stops) if stops else p.stop,
+                                            "target": min(targets) if targets else p.target}))
+        return out
+
+    def create_protection(parent_id: str, *, mode: str, symbol: str, quantity: Decimal, currency: str,
+                          take_profit: Decimal, stop_loss: Decimal, live: bool, bracket: bool) -> tuple[str, str]:
+        tp_id, sl_id = protection_ids(parent_id)
+        money = "dinero real" if live else "dinero ficticio"
+        when = "cuando se ejecute la compra" if bracket else "de acciones que ya tienes"
+        for child_id, order_type, price, note in (
+            (tp_id, "LMT", take_profit, f"Venta de ganancia máxima {when} ({money})"),
+            (sl_id, "STP", stop_loss, f"Stop de pérdida máxima {when} ({money})"),
+        ):
+            orders.create_draft(
+                client_order_id=child_id, mode=mode, is_mock=False, symbol=symbol, side=OrderSide.SELL,
+                quantity=quantity, limit_price=price, currency=currency, note=note,
+                allow_live=live and settings.real_trading, order_type=order_type,
+                parent_client_order_id=parent_id if bracket else None,
+            )
+        return tp_id, sl_id
+
+    def order_route() -> bool:
+        """True si las órdenes van a la cuenta real; lanza 409 si no se pueden enviar órdenes."""
+        if settings.real_account:
+            if not settings.real_trading:
+                raise HTTPException(409, "Las órdenes reales no están habilitadas: la cuenta real está en solo lectura.")
+            if broker is None or not broker.orders_enabled or getattr(broker, "order_mode", "paper") != "live":
+                raise HTTPException(409, "El conector de IBKR no tiene habilitadas las órdenes reales.")
+            return True
+        if broker is None or not broker.orders_enabled:
+            raise HTTPException(409, "El envío de órdenes Paper no está habilitado (hace falta la fuente IBKR).")
+        return False
+
+    @app.post("/v1/orders/protect", response_model=Envelope[list[OrderRecord]], status_code=201)
+    def protect_position(req: ProtectRequest):
+        """Venta de ganancia máxima + stop de pérdida máxima (OCA) para acciones que ya tienes."""
+        live = order_route()
+        mode = "live" if live else "paper"
+        tp_id, sl_id = protection_ids(req.client_order_id)
+        existing = [orders.get(tp_id), orders.get(sl_id)]
+        if all(existing):
+            same = all((o.symbol, o.quantity) == (req.symbol, req.quantity) for o in existing) and \
+                (existing[0].limit_price, existing[1].limit_price) == (req.take_profit_price, req.stop_loss_price)
+            if not same or any(o.mode != mode for o in existing):
+                raise HTTPException(409, "client_order_id ya usado con otros parámetros")
+            return JSONResponse(ibkr_envelope(existing).model_dump(mode="json"), status_code=200)
+        snap = broker_snapshot()
+        try:
+            if not req.confirmed:
+                raise RiskRejection("Falta tu confirmación explícita para enviar la orden.")
+            free = free_shares(req.symbol, req.currency, snap.positions, protective_orders(mode))
+            if req.quantity > free:
+                raise RiskRejection(f"Solo puedes proteger acciones que tengas libres: {free:f} de {req.symbol} "
+                                    "(las que ya tienen una venta abierta no cuentan).")
+            reference = broker.reference_price(req.symbol, req.currency)
+            if reference is None or reference <= 0:
+                raise RiskRejection(f"No hay precio de referencia para {req.symbol} ahora mismo.")
+            check_protection_prices(reference, req.take_profit_price, req.stop_loss_price)
+        except RiskRejection as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except BrokerUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        create_protection(req.client_order_id, mode=mode, symbol=req.symbol, quantity=req.quantity,
+                          currency=req.currency, take_profit=req.take_profit_price,
+                          stop_loss=req.stop_loss_price, live=live, bracket=False)
+        for i in (tp_id, sl_id):
+            orders.transition(i, OrderState.RISK_APPROVED,
+                              f"Controles superados: confirmada, {req.quantity} acciones libres, "
+                              f"precios dentro del 50 % de la referencia ({reference})")
+        log_event(log, "Protección aprobada", symbol=req.symbol, quantity=str(req.quantity),
+                  take_profit=str(req.take_profit_price), stop_loss=str(req.stop_loss_price), mode=mode)
+        submit_group(tp_id, sl_id, None)
+        return JSONResponse(ibkr_envelope([orders.get(tp_id), orders.get(sl_id)]).model_dump(mode="json"),
+                            status_code=201)
+
+    def submit_group(tp_id: str, sl_id: str, parent_id: str | None) -> None:
+        ids = [i for i in (parent_id, tp_id, sl_id) if i]
+        try:
+            broker.submit_protected(tp_id, sl_id, parent_id)
+        except Exception as exc:  # noqa: BLE001
+            if orders.get(ids[0]).state is OrderState.RISK_APPROVED:
+                for i in ids:
+                    orders.transition(i, OrderState.CANCELLED, f"No se pudo enviar: {exc}")
+                raise HTTPException(503, f"No se pudo enviar la orden: {exc}") from exc
+            # Llegó a SUBMITTING: queda en UNKNOWN y se reconciliará; no se reenvía.
+
     def place_order(req: PaperOrderRequest, *, live: bool):
         mode = "live" if live else settings.mode
         if kill_switch.active:
@@ -448,6 +556,10 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             else:
                 check_order_limits(req, positions=snap.positions, max_order_value=settings.max_order_value)
                 limit_text = f"importe ≤ {settings.max_order_value}"
+            if req.protected:
+                if req.side is not OrderSide.BUY:
+                    raise RiskRejection("La venta automática de ganancia y pérdida solo se añade a una compra.")
+                check_protection_prices(req.limit_price, req.take_profit_price, req.stop_loss_price)
             check_price_band(req, broker.reference_price(req.symbol, req.currency))
         except RiskRejection as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -464,7 +576,18 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                           f"Controles superados: confirmada, {limit_text}, precio dentro del 5 % de la referencia")
         log_event(log, "Orden REAL aprobada" if live else "Orden Paper aprobada",
                   client_order_id=order.client_order_id, symbol=req.symbol,
-                  side=req.side.value, quantity=str(req.quantity), limit=str(req.limit_price))
+                  side=req.side.value, quantity=str(req.quantity), limit=str(req.limit_price),
+                  take_profit=str(req.take_profit_price), stop_loss=str(req.stop_loss_price))
+        if req.protected:
+            tp_id, sl_id = create_protection(
+                order.client_order_id, mode=mode, symbol=req.symbol, quantity=req.quantity, currency=req.currency,
+                take_profit=req.take_profit_price, stop_loss=req.stop_loss_price, live=live, bracket=True)
+            for i in (tp_id, sl_id):
+                orders.transition(i, OrderState.RISK_APPROVED,
+                                  "Controles superados con la compra: ganancia por encima y pérdida por debajo del límite")
+            submit_group(tp_id, sl_id, order.client_order_id)
+            body = ibkr_envelope(orders.get(order.client_order_id)).model_dump(mode="json")
+            return JSONResponse(body, status_code=201)
         try:
             broker.submit(order.client_order_id)
         except Exception as exc:  # noqa: BLE001

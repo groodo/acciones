@@ -73,5 +73,8 @@ struct RootView: View {
         .sheet(item: $model.paperOrderDraft) { draft in
             PaperOrderSheet(draft: draft).environmentObject(model)
         }
+        .sheet(item: $model.protectDraft) { draft in
+            ProtectSheet(draft: draft).environmentObject(model)
+        }
     }
 }

@@ -166,6 +166,7 @@ final class AppModel: ObservableObject {
 
     /// Borrador para la hoja de nueva orden Paper (nil = cerrada).
     @Published var paperOrderDraft: PaperOrderDraft?
+    @Published var protectDraft: ProtectDraft?
 
     var canSendPaperOrders: Bool { status?.tradingAllowed == true && status?.maxOrderValue != nil }
     /// Cuenta real con órdenes habilitadas: las órdenes mueven dinero real.
@@ -181,7 +182,7 @@ final class AppModel: ObservableObject {
         do {
             let request = PaperOrderRequest(
                 symbol: draft.symbol, side: draft.side, quantity: draft.quantity, limitPrice: price,
-                confirmed: true, clientOrderId: draft.clientOrderId
+                confirmed: true, clientOrderId: draft.clientOrderId, protection: draft.protection(entry: price)
             )
             let real = isRealTrading
             let order: OrderRecord
@@ -194,6 +195,28 @@ final class AppModel: ObservableObject {
                 ? "Orden REAL \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero real."
                 : "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
             paperOrderDraft = nil
+            await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func openProtect(_ position: Position) {
+        let free = Int(truncating: NSDecimalNumber(decimal: position.quantity.value))
+        protectDraft = ProtectDraft(symbol: position.symbol, currency: position.currency, maxQuantity: free,
+                                    quantity: free, price: position.lastPrice.value)
+    }
+
+    /// Envía la venta de ganancia y el stop de pérdida ya confirmados. Devuelve nil si fue bien.
+    func sendProtect(_ draft: ProtectDraft) async -> String? {
+        do {
+            let request = ProtectRequest(symbol: draft.symbol, quantity: draft.quantity, protection: draft.protection,
+                                         currency: draft.currency, confirmed: true, clientOrderId: draft.clientOrderId)
+            _ = try await client.protectPosition(request)
+            actionMessage = "\(draft.symbol) protegida en IBKR: venta a \(Fmt.money(draft.protection.takeProfit, currency: draft.currency)) "
+                + "o stop a \(Fmt.money(draft.protection.stopLoss, currency: draft.currency)); si se ejecuta una, se cancela la otra."
+            protectDraft = nil
             await refresh()
             return nil
         } catch {
@@ -262,4 +285,27 @@ struct PaperOrderDraft: Identifiable, Equatable {
     var side: String
     var quantity: Int
     var limitPrice: Decimal?
+    /// Solo en compras: añadir venta automática de ganancia máxima y stop de pérdida máxima.
+    var protect = true
+    var gainPct: Decimal = 2
+    var lossPct: Decimal = 1
+
+    func protection(entry: Decimal) -> Protection? {
+        side == "BUY" && protect ? Protection(entry: entry, gainPct: gainPct, lossPct: lossPct) : nil
+    }
+}
+
+struct ProtectDraft: Identifiable, Equatable {
+    let id = UUID()
+    let clientOrderId = SimulatedOrderRequest.newClientOrderId()
+    let symbol: String
+    let currency: String
+    let maxQuantity: Int
+    var quantity: Int
+    /// Precio actual: los porcentajes se calculan sobre él.
+    let price: Decimal
+    var gainPct: Decimal = 2
+    var lossPct: Decimal = 1
+
+    var protection: Protection { Protection(entry: price, gainPct: gainPct, lossPct: lossPct) }
 }
