@@ -7,8 +7,13 @@
      Nasdaq los valores con volumen inusual y los que más suben; los 15 primeros pasan por Kronos
      y se muestran los 10 mejores, primero los de «Comprar». Si el escáner no responde, se revisan
      por turnos 50 grandes valores del Nasdaq.
-2. **Qué datos.** Velas de 5 minutos de la sesión regular de los últimos 5 días que da IB Gateway
-   (apertura, máximo, mínimo, cierre y volumen). Hacen falta al menos 120 velas cerradas y recientes.
+2. **Qué datos.** Velas de 5 minutos de la sesión regular de los últimos días (apertura, máximo,
+   mínimo, cierre y volumen). Hacen falta al menos 120 velas cerradas y recientes.
+   - Si has puesto tus claves de **Alpaca** en Configuración, las velas salen de Alpaca: precios en
+     tiempo real del mercado IEX, gratis. El precio es casi el del mercado consolidado, pero el
+     volumen es solo una parte del total. Si Alpaca falla, se usan las velas de IBKR y la señal lo dice.
+   - Sin Alpaca, las velas son las de IB Gateway: en tiempo real solo con suscripción de datos de IBKR.
+   - IBKR sigue haciendo el escáner de oportunidades, las posiciones y las órdenes.
 3. **Qué hace Kronos-small.** Con las últimas velas (hasta 500) genera 8 trayectorias posibles de
    las próximas 12 velas (60 minutos). De ellas se sacan, para 5, 15, 30 y 60 minutos, la mediana
    (p50) y el rango p10–p90 de la rentabilidad prevista. No son probabilidades calibradas.

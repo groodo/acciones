@@ -185,6 +185,9 @@ class SignalEngine:
         except ModelUnavailable as exc:
             return not_evaluable(inp, f"{exc} No se propondrá ninguna orden.")
         ev = evaluate(inp, result, self.params)
+        note = getattr(self.source, "data_note", None)
+        if note:
+            ev.signal = ev.signal.model_copy(update={"reasons": [*ev.signal.reasons, note]})
         self._store(inp, result, ev)
         log_event(log, "Señal evaluada", symbol=symbol, proposal=ev.signal.proposal.value,
                   status=ev.signal.status.value, latency_ms=result.latency_ms)

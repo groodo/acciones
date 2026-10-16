@@ -5,6 +5,10 @@ struct ConfiguracionView: View {
     @EnvironmentObject var model: AppModel
     @State private var capText = ""
     @State private var capMessage: String?
+    @State private var alpacaKeyId = ""
+    @State private var alpacaSecret = ""
+    @State private var alpacaMessage: String?
+    @State private var savingAlpaca = false
 
     var body: some View {
         Form {
@@ -24,6 +28,42 @@ struct ConfiguracionView: View {
                     Text(detail).font(.caption).foregroundStyle(.secondary)
                 }
                 Text("La autenticación se hará siempre en IB Gateway oficial. La aplicación nunca pedirá ni guardará tu contraseña ni códigos 2FA.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SwiftUI.Section("Datos en tiempo real (Alpaca)") {
+                if let provider = model.dataProvider {
+                    LabeledContent("Velas para Kronos", value: provider.configured
+                                   ? "Alpaca · IEX en tiempo real (clave \(provider.keyIdMasked ?? "…"))" : "IBKR")
+                    Text(provider.detail).font(.caption).foregroundStyle(.secondary)
+                }
+                TextField("API Key ID de Alpaca", text: $alpacaKeyId)
+                SecureField("Secret Key de Alpaca", text: $alpacaSecret)
+                HStack {
+                    Button(savingAlpaca ? "Comprobando…" : "Guardar claves") {
+                        let keyId = alpacaKeyId.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let secret = alpacaSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+                        savingAlpaca = true
+                        Task {
+                            let error = await model.saveAlpacaKeys(keyId: keyId, secretKey: secret)
+                            savingAlpaca = false
+                            if let error {
+                                alpacaMessage = error
+                            } else {
+                                alpacaMessage = "Claves comprobadas y guardadas. Kronos usará precios en tiempo real desde el próximo ciclo."
+                                alpacaKeyId = ""
+                                alpacaSecret = ""
+                            }
+                        }
+                    }
+                    .disabled(savingAlpaca || alpacaKeyId.isEmpty || alpacaSecret.isEmpty)
+                    if model.dataProvider?.configured == true {
+                        Button("Quitar claves", role: .destructive) {
+                            Task { alpacaMessage = await model.deleteAlpacaKeys() ?? "Claves borradas: se vuelve a las velas de IBKR." }
+                        }
+                    }
+                }
+                if let alpacaMessage { Text(alpacaMessage).font(.caption) }
+                Text("Cuenta gratuita de alpaca.markets, claves de datos (paper sirve). Se guardan solo en este Mac y nunca se muestran. IBKR sigue buscando oportunidades y llevando tus órdenes.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modo de operativa") {

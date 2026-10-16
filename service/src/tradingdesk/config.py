@@ -79,6 +79,10 @@ class Settings:
         return self.data_source == "ibkr" and self.ib_account == "real-trading"
 
     @property
+    def alpaca_keys_path(self) -> Path:
+        return self.data_dir / "alpaca-keys.json"
+
+    @property
     def kronos_dir(self) -> Path:
         return self.data_dir / "kronos"
 

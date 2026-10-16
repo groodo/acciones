@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import REAL_ORDER_CEILING_EUR, Settings
+from .alpaca import IEX_NOTE, AlpacaData, AlpacaError, HybridSource, load_keys, mask_key, save_keys
 from .broker import BrokerAdapter, BrokerUnavailable, IbkrPaperBroker
 from .db import Database
 from .domain import (
@@ -65,6 +66,11 @@ log = logging.getLogger("tradingdesk.api")
 
 class WatchlistRequest(BaseModel):
     symbols: list[str] = Field(max_length=MAX_WATCHLIST * 2)
+
+
+class AlpacaKeysRequest(BaseModel):
+    key_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9]+$")
+    secret_key: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9/+=]+$")
 
 
 class OrderLimitRequest(BaseModel):
@@ -121,8 +127,18 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
         _record_snapshot(db, provider.account())
     engine: SignalEngine | None = None
     forecaster = forecaster or KronosForecaster(settings.kronos_dir)
+    alpaca_holder: list[AlpacaData] = []
+
+    def candle_source():
+        keys = load_keys(settings.alpaca_keys_path)
+        if keys and broker is not None:
+            alpaca_holder[:] = [AlpacaData(*keys)]
+            return HybridSource(broker, alpaca_holder[0])
+        alpaca_holder.clear()
+        return broker
+
     if broker is not None and hasattr(broker, "historical_candles"):
-        engine = SignalEngine(db, broker, forecaster, prefs.watchlist(list(settings.watchlist)),
+        engine = SignalEngine(db, candle_source(), forecaster, prefs.watchlist(list(settings.watchlist)),
                               interval_s=settings.signal_interval_s)
 
     @asynccontextmanager
@@ -320,6 +336,33 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
             engine.set_watchlist(symbols)
         log_event(log, "Lista de seguimiento actualizada", symbols=",".join(symbols))
         return {"symbols": symbols, "max": MAX_WATCHLIST}
+
+    @app.get("/v1/data-provider")
+    def get_data_provider():
+        keys = load_keys(settings.alpaca_keys_path)
+        return {"provider": "alpaca" if keys else "ibkr", "configured": keys is not None,
+                "key_id_masked": mask_key(keys[0]) if keys else None,
+                "detail": IEX_NOTE if keys else "Velas de IBKR (diferidas sin suscripción de datos)."}
+
+    @app.put("/v1/data-provider")
+    def put_data_provider(req: AlpacaKeysRequest):
+        try:
+            AlpacaData(req.key_id, req.secret_key).bars("AAPL", 5, days=5)
+        except AlpacaError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        save_keys(settings.alpaca_keys_path, req.key_id, req.secret_key)
+        if engine is not None:
+            engine.source = candle_source()
+        log_event(log, "Claves de Alpaca guardadas", key=mask_key(req.key_id))
+        return get_data_provider()
+
+    @app.delete("/v1/data-provider")
+    def delete_data_provider():
+        settings.alpaca_keys_path.unlink(missing_ok=True)
+        if engine is not None:
+            engine.source = candle_source()
+        log_event(log, "Claves de Alpaca borradas")
+        return get_data_provider()
 
     @app.get("/v1/order-limit")
     def get_order_limit():

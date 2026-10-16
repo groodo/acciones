@@ -309,6 +309,14 @@ public struct OrderLimit: Codable, Hashable, Sendable {
     public let realTrading: Bool
 }
 
+/// De dónde salen las velas que analiza Kronos: IBKR o Alpaca (tiempo real IEX gratuito).
+public struct DataProvider: Codable, Hashable, Sendable {
+    public let provider: String
+    public let configured: Bool
+    public let keyIdMasked: String?
+    public let detail: String
+}
+
 public struct SimulatedOrderRequest: Encodable, Sendable {
     public let clientOrderId: String
     public let symbol: String

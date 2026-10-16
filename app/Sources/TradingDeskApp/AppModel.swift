@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var opportunitiesNotice: String?
     @Published private(set) var watchlist: [String] = []
     @Published private(set) var orderLimit: OrderLimit?
+    @Published private(set) var dataProvider: DataProvider?
     @Published var curveRange: String = "30d"
     /// Verdadero si alguna de las respuestas mostradas está marcada como simulada por el servicio.
     @Published private(set) var isMock = true
@@ -113,6 +114,7 @@ final class AppModel: ObservableObject {
             }
             if let w = try? await client.watchlist() { watchlist = w.symbols }
             orderLimit = try? await client.orderLimit()
+            dataProvider = try? await client.dataProvider()
             isMock = flags.contains(true)
             serviceError = nil
             lastRefresh = Date()
@@ -215,6 +217,25 @@ final class AppModel: ObservableObject {
         do {
             orderLimit = try await client.setOrderLimit(eur: eur)
             await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Guarda las claves de Alpaca (el servicio las valida antes). Devuelve nil si fue bien.
+    func saveAlpacaKeys(keyId: String, secretKey: String) async -> String? {
+        do {
+            dataProvider = try await client.setAlpacaKeys(keyId: keyId, secretKey: secretKey)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func deleteAlpacaKeys() async -> String? {
+        do {
+            dataProvider = try await client.deleteAlpacaKeys()
             return nil
         } catch {
             return error.localizedDescription

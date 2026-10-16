@@ -109,6 +109,18 @@ public final class APIClient: Sendable {
         return try await send("PUT", "/v1/order-limit", body: try JSON.encoder().encode(body))
     }
 
+    public func dataProvider() async throws -> DataProvider { try await get("/v1/data-provider") }
+
+    /// Envía las claves de Alpaca al servicio local, que las comprueba y las guarda; nunca las devuelve.
+    public func setAlpacaKeys(keyId: String, secretKey: String) async throws -> DataProvider {
+        struct Body: Encodable { let keyId: String; let secretKey: String }
+        return try await send("PUT", "/v1/data-provider", body: try JSON.encoder().encode(Body(keyId: keyId, secretKey: secretKey)))
+    }
+
+    public func deleteAlpacaKeys() async throws -> DataProvider {
+        try await send("DELETE", "/v1/data-provider", body: nil)
+    }
+
     public func equityCurve(range: String) async throws -> Envelope<EquityCurve> {
         try await get("/v1/equity-curve", query: [URLQueryItem(name: "range", value: range)])
     }
