@@ -333,3 +333,10 @@ def test_api_real_readonly_refuses_real_orders(tmp_path):
         assert c.post("/v1/orders/real", json=REAL_ORDER).status_code == 409
     assert not any(call[0] == "submit" for call in fake.calls)
     app.state.db.close()
+
+
+def test_scanner_skips_preferreds_warrants_and_units():
+    from tradingdesk.broker import is_common_stock_symbol  # noqa: PLC0415
+
+    assert all(is_common_stock_symbol(s) for s in ("AAPL", "GOOGL", "WSE", "CRWV"))
+    assert not any(is_common_stock_symbol(s) for s in ("SMCIP", "ABCDW", "ABCDR", "ABCDU"))

@@ -72,6 +72,11 @@ def is_paper_account(account_id: str) -> bool:
     return account_id.upper().startswith("DU")
 
 
+def is_common_stock_symbol(symbol: str) -> bool:
+    """Descarta preferentes, warrants, derechos, unidades y valores en quiebra del Nasdaq (5.ª letra P/W/R/U/Q)."""
+    return not (len(symbol) == 5 and symbol[-1] in "PWRUQ")
+
+
 def mask_account(account_id: str) -> str:
     if len(account_id) <= 5:
         return "*" * len(account_id)
@@ -403,7 +408,7 @@ class IbkrPaperBroker:
                                           stockTypeFilter="CORP", numberOfRows=n)  # solo empresas, sin ETF
                 for row in await ib.reqScannerDataAsync(sub) or []:
                     symbol = row.contractDetails.contract.symbol
-                    if symbol and symbol not in {s for s, _ in out}:
+                    if symbol and is_common_stock_symbol(symbol) and symbol not in {s for s, _ in out}:
                         out.append((symbol, why))
             return out
         return self._call(run, timeout=30)[:n]
