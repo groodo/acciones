@@ -108,6 +108,15 @@ final class ClientTests: XCTestCase {
         }
     }
 
+    func testModelStatusDecodes() async throws {
+        let body = #"{"installed":true,"loaded":true,"model_id":"NeoQuasar/Kronos-small","version":"v1","device":"mps","detail":"Cargado","last_latency_ms":5500,"last_run":"2026-10-16T16:30:00.123456+00:00","watchlist":["AAPL","SPY"]}"#
+        let client = APIClient(config: config, transport: StubTransport(status: 200, body: body), tokenProvider: { "abc" })
+        let status = try await client.modelStatus()
+        XCTAssertEqual(status.summary, "Funcionando (mps)")
+        XCTAssertEqual(status.lastLatencyMs, 5500)
+        XCTAssertNotNil(status.lastRun)
+    }
+
     func testKillSwitchBlockSurfacesMessage() async {
         let body = #"{"detail":"Operativa detenida: no se aceptan nuevas entradas."}"#
         let client = APIClient(config: config, transport: StubTransport(status: 423, body: body), tokenProvider: { "abc" })
@@ -130,5 +139,21 @@ final class ClientTests: XCTestCase {
     func testOrderStateTerminality() {
         XCTAssertTrue(OrderState.filled.isTerminal)
         XCTAssertFalse(OrderState.unknown.isTerminal)
+    }
+
+    func testProtectionRoundsInsideTheChosenPercentages() throws {
+        let p = Protection(entry: Decimal(string: "187.33")!, gainPct: 2, lossPct: 1)
+        XCTAssertEqual(p.takeProfit, Decimal(string: "191.07")!)  // 191.0766 → hacia abajo
+        XCTAssertEqual(p.stopLoss, Decimal(string: "185.46")!)    // 185.4567 → hacia arriba
+        XCTAssertEqual(p.maxLoss(entry: Decimal(string: "187.33")!, quantity: 2), Decimal(string: "3.74")!)
+        let body = try JSON.encoder().encode(PaperOrderRequest(symbol: "aapl", side: "BUY", quantity: 2,
+                                                               limitPrice: Decimal(string: "187.33")!,
+                                                               confirmed: true, protection: p))
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        XCTAssertEqual(object?["take_profit_price"] as? String, "191.07")
+        XCTAssertEqual(object?["stop_loss_price"] as? String, "185.46")
+        let plain = try JSON.encoder().encode(PaperOrderRequest(symbol: "KO", side: "BUY", quantity: 1,
+                                                                limitPrice: 60, confirmed: true))
+        XCTAssertNil((try JSONSerialization.jsonObject(with: plain) as? [String: Any])?["stop_loss_price"])
     }
 }

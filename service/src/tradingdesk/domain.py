@@ -170,6 +170,10 @@ class OrderRecord(Model):
     ibkr_order_id: int | None = None
     ibkr_perm_id: int | None = None
     note: str | None = None
+    # LMT: limitada (limit_price es el límite). STP: stop de pérdida (limit_price es el precio de disparo).
+    order_type: Literal["LMT", "STP"] = "LMT"
+    # Ventas de protección: la compra de la que cuelgan (orden bracket) o None si protegen una posición.
+    parent_client_order_id: str | None = None
 
 
 class OrderEvent(Model):

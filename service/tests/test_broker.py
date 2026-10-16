@@ -113,11 +113,14 @@ def test_orders_only_go_out_through_submit_and_readonly_otherwise():
     tree = ast.parse(source)
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
     assert not {c.func.attr for c in calls} & {"reqGlobalCancel", "bracketOrder", "oneCancelsAll", "whatIfOrder"}
-    assert sum(c.func.attr == "placeOrder" for c in calls) == 1
+    # Solo dos caminos envían órdenes: la orden suelta y el grupo con ganancia/pérdida.
+    assert sum(c.func.attr == "placeOrder" for c in calls) == 2
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "IbkrPaperBroker")
-    submit = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "submit")
-    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(submit))
-    assert "is_paper_account(self._account" in ast.get_source_segment(source, submit)
+    for name, mode_check in (("submit", "order.mode != self.order_mode"), ("submit_protected", "r.mode != self.order_mode")):
+        fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
+        assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "placeOrder" for n in ast.walk(fn))
+        text = ast.get_source_segment(source, fn)
+        assert "self._account_matches()" in text and mode_check in text and "if not self.orders_enabled" in text
     connect = next(c for c in calls if c.func.attr == "connectAsync")
     readonly = next(k for k in connect.keywords if k.arg == "readonly")
     assert ast.unparse(readonly.value) == "not self.orders_enabled"
@@ -150,6 +153,9 @@ class FakeBroker:
 
     def submit(self, client_order_id):
         self.calls.append(("submit", client_order_id))
+
+    def submit_protected(self, take_profit_id, stop_loss_id, parent_id=None):
+        self.calls.append(("protect", parent_id, take_profit_id, stop_loss_id))
 
     def cancel(self, client_order_id):
         self.calls.append(("cancel", client_order_id))
@@ -193,9 +199,15 @@ def test_api_serves_ibkr_account_labelled_as_real_paper(settings):
         status = c.get("/v1/status").json()["data"]
         assert (status["broker"], status["mode_label"], status["quotes"]) == ("conectado", "PAPER", "diferidas")
         assert status["trading_allowed"] is False
-        # Lo que aún no viene de IBKR sigue etiquetado como simulado.
-        for path in ("/v1/signals", "/v1/equity-curve?range=7d", "/v1/orders"):
-            assert c.get(path).json()["is_mock"] is True
+        # Con IBKR nada se simula: ni señales, ni curva, ni órdenes de ejemplo.
+        for path in ("/v1/signals", "/v1/equity-curve?range=7d", "/v1/orders", "/v1/kill-switch"):
+            assert c.get(path).json()["is_mock"] is False, path
+        assert c.get("/v1/orders").json()["data"] == []
+        assert c.get("/v1/signals").json()["data"] == []
+        curve = c.get("/v1/equity-curve?range=todo").json()["data"]
+        assert [p["equity_eur"] for p in curve["points"]] == ["1012.34"] and curve["sufficient"] is False
+        r = c.post("/v1/orders/simulated", json={"client_order_id": "UI-0000001", "symbol": "MSFT", "quantity": "1", "limit_price": "418"})
+        assert r.status_code == 409
         ks = c.post("/v1/kill-switch", json={"active": True}).json()["data"]
         assert [p["symbol"] for p in ks["open_positions"]] == ["KO"]
     assert fake.stopped
@@ -212,3 +224,124 @@ def test_api_without_gateway_shows_no_balances(settings):
         status = c.get("/v1/status").json()["data"]
         assert status["broker"] == "reconectando" and status["alerts"][0].startswith("No se puede")
     app.state.db.close()
+
+
+def test_real_account_broker_cannot_send_orders():
+    b = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                      account_kind="real")
+    assert b.orders_enabled is False
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.submit("UI-00000001")
+    with pytest.raises(broker_module.BrokerUnavailable):
+        b.cancel("UI-00000001")
+
+
+def test_api_with_real_account_is_labelled_and_refuses_orders(tmp_path):
+    from tradingdesk.config import Settings  # noqa: PLC0415
+
+    settings = Settings(data_dir=tmp_path, data_source="ibkr", ib_account="real-readonly", paper_orders=False,
+                        ib_port=4001)
+    real_values = [AccountValue("U7654321", v.tag, v.value, v.currency, "") for v in values() if v.account == ACC]
+    acc = build_account(real_values, account_id="U7654321", daily_pnl=None, quotes=Freshness.DELAYED,
+                        now=FIXED_NOW, mode="live")
+    fake = FakeBroker(BrokerSnapshot(link="conectado", detail="IB Gateway cuenta REAL", account=acc,
+                                     quotes=Freshness.DELAYED, updated_at=FIXED_NOW), orders_enabled=True)
+    app, client = ibkr_client(settings, fake)
+    with client as c:
+        body = c.get("/v1/account").json()
+        assert (body["mode"], body["data"]["mode"], body["data"]["account_id_masked"]) == ("live", "live", "U****321")
+        status = c.get("/v1/status").json()["data"]
+        assert (status["mode"], status["mode_label"]) == ("live", "REAL · SOLO LECTURA")
+        assert "solo lectura" in status["alerts"][0]
+        r = c.post("/v1/orders/paper", json={"client_order_id": "UI-00000001", "symbol": "AAPL", "side": "BUY",
+                                              "quantity": "1", "limit_price": "100", "currency": "USD",
+                                              "confirmed": True})
+        assert r.status_code == 409
+    assert not any(call[0] == "submit" for call in fake.calls)
+    app.state.db.close()
+
+
+def test_real_equity_curve_ignores_duplicate_instants(tmp_path):
+    from tradingdesk.api import _real_equity_curve, _record_snapshot  # noqa: PLC0415
+    from tradingdesk.db import Database  # noqa: PLC0415
+
+    db = Database(tmp_path / "t.sqlite3")
+    db.migrate()
+    acc = build_account(values(), account_id=ACC, daily_pnl=None, quotes=Freshness.DELAYED, now=FIXED_NOW)
+    _record_snapshot(db, acc, source="IBKR")
+    _record_snapshot(db, acc, source="IBKR")
+    curve = _real_equity_curve(db, "todo", "paper", now=FIXED_NOW)
+    assert len(curve.points) == 1 and curve.sufficient is False
+    db.close()
+
+
+def _real_settings(tmp_path, account="real-trading"):
+    from tradingdesk.config import Settings  # noqa: PLC0415
+
+    return Settings(data_dir=tmp_path, data_source="ibkr", ib_account=account, paper_orders=False, ib_port=4001)
+
+
+def _real_snapshot():
+    real_values = [AccountValue("U7654321", v.tag, v.value, v.currency, "") for v in values() if v.account == ACC]
+    acc = build_account(real_values, account_id="U7654321", daily_pnl=None, quotes=Freshness.DELAYED,
+                        now=FIXED_NOW, mode="live")
+    return BrokerSnapshot(link="conectado", detail="IB Gateway cuenta REAL", account=acc, quotes=Freshness.DELAYED,
+                          updated_at=FIXED_NOW)
+
+
+REAL_ORDER = {"client_order_id": "UI-00000009", "symbol": "AAPL", "side": "BUY", "quantity": "2",
+              "limit_price": "100", "currency": "USD", "confirmed": True}
+
+
+def test_real_broker_only_sends_with_explicit_permission():
+    paper_kind = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                               account_kind="real")
+    assert paper_kind.orders_enabled is False
+    real = broker_module.IbkrPaperBroker("127.0.0.1", 4001, 1, orders=object(), orders_enabled=True,
+                                         account_kind="real", allow_real_orders=True)
+    assert real.orders_enabled is True and real.order_mode == "live"
+    real._account = "DU1234567"  # sesión Paper con la app en modo real: no coincide
+    assert real._account_matches() is False
+    real._account = "U7654321"
+    assert real._account_matches() is True
+
+
+def test_api_real_trading_sends_confirmed_order_within_euro_cap(tmp_path):
+    fake = FakeBroker(_real_snapshot(), orders_enabled=True)
+    fake.order_mode = "live"
+    app, client = ibkr_client(_real_settings(tmp_path), fake)
+    with client as c:
+        status = c.get("/v1/status").json()["data"]
+        assert status["mode_label"] == "REAL · CON ÓRDENES" and status["trading_allowed"] is True
+        assert status["max_order_value"] == {"amount": "1000", "currency": "EUR"}
+        assert c.post("/v1/orders/paper", json=REAL_ORDER).status_code == 409
+        assert c.post("/v1/orders/real", json={**REAL_ORDER, "confirmed": False}).status_code == 422
+        too_big = c.post("/v1/orders/real", json={**REAL_ORDER, "client_order_id": "UI-00000010",
+                                                   "quantity": "11"})  # 1100 $ ≈ 1012 € > 1000 €
+        assert too_big.status_code == 422 and "1000" in too_big.json()["detail"]
+        ok = c.post("/v1/orders/real", json=REAL_ORDER)
+        assert ok.status_code == 201
+        order = ok.json()["data"]
+        assert (order["mode"], order["is_mock"], ok.json()["mode"]) == ("live", False, "live")
+        assert [o["client_order_id"] for o in c.get("/v1/orders").json()["data"]] == ["UI-00000009"]
+        c.post("/v1/kill-switch", json={"active": True})
+        assert c.post("/v1/orders/real", json={**REAL_ORDER, "client_order_id": "UI-00000011"}).status_code == 423
+    assert [call for call in fake.calls if call[0] == "submit"] == [("submit", "UI-00000009")]
+    app.state.db.close()
+
+
+def test_api_real_readonly_refuses_real_orders(tmp_path):
+    fake = FakeBroker(_real_snapshot(), orders_enabled=True)
+    fake.order_mode = "live"
+    app, client = ibkr_client(_real_settings(tmp_path, "real-readonly"), fake)
+    with client as c:
+        assert c.post("/v1/orders/real", json=REAL_ORDER).status_code == 409
+    assert not any(call[0] == "submit" for call in fake.calls)
+    app.state.db.close()
+
+
+def test_scanner_skips_preferreds_warrants_and_units():
+    from tradingdesk.broker import is_common_stock_symbol  # noqa: PLC0415
+
+    assert all(is_common_stock_symbol(s) for s in ("AAPL", "GOOGL", "WSE", "CRWV"))
+    assert not any(is_common_stock_symbol(s) for s in ("SMCIP", "ABCDW", "ABCDR", "ABCDU"))

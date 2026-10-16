@@ -1,11 +1,17 @@
-"""Conexión con IB Gateway (solo cuenta Paper).
+"""Conexión con IB Gateway.
 
-Se leen saldo, posiciones y cotizaciones de la cuenta Paper a través de la TWS
-API oficial (biblioteca ``ib_async``) y, si está habilitado, se envían y cancelan
-órdenes limitadas en esa cuenta. Sin envío habilitado la conexión es
-``readonly=True``. Si la cuenta conectada no es Paper (los identificadores Paper
-empiezan por ``DU``), se desconecta y no reintenta; además se comprueba otra vez
-antes de cada envío.
+Se leen saldo, posiciones y cotizaciones a través de la TWS API oficial
+(biblioteca ``ib_async``). Hay dos tipos de conexión:
+
+- Paper (por defecto): si está habilitado, se envían y cancelan órdenes limitadas.
+  Si la cuenta conectada no es Paper (los identificadores Paper empiezan por
+  ``DU``), se desconecta y no reintenta; además se comprueba otra vez antes de
+  cada envío.
+- Real (``account_kind="real"``): exige una cuenta que no sea Paper. Por defecto es
+  de solo lectura (``readonly=True``). Solo con ``allow_real_orders=True`` (cuenta
+  ``real-trading`` en la configuración) se envían órdenes limitadas ya confirmadas
+  por el usuario y aprobadas por los controles de riesgo; ``submit`` comprueba de
+  nuevo el tipo de cuenta y el modo de la orden antes de cada envío.
 
 La API de IB es asíncrona; se ejecuta en un hilo propio con su bucle de eventos
 y publica instantáneas inmutables que la API HTTP lee sin bloquear.
@@ -31,6 +37,16 @@ log = logging.getLogger("tradingdesk.broker")
 # ib_async registra cada intento fallido como ERROR; ya lo resume nuestro aviso de reconexión.
 logging.getLogger("ib_async.client").setLevel(logging.CRITICAL)
 
+
+class _ScannerCancelNoise(logging.Filter):
+    """IBKR responde con el error 162 al cerrar cada escaneo terminado: es normal, no un fallo."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "scanner subscription cancelled" not in record.getMessage()
+
+
+logging.getLogger("ib_async.wrapper").addFilter(_ScannerCancelNoise())
+
 CENT = Decimal("0.01")
 REFRESH_SECONDS = 5
 RECONNECT_SECONDS = (2, 5, 10, 30)
@@ -41,7 +57,7 @@ BrokerLink = Literal["conectado", "desconectado", "reconectando"]
 
 
 class NotPaperAccountError(RuntimeError):
-    """La sesión de IB Gateway no es de una cuenta Paper."""
+    """La sesión de IB Gateway no es del tipo de cuenta configurado (Paper o real)."""
 
 
 class BrokerUnavailable(RuntimeError):
@@ -54,6 +70,11 @@ class UnknownSymbol(BrokerUnavailable):
 
 def is_paper_account(account_id: str) -> bool:
     return account_id.upper().startswith("DU")
+
+
+def is_common_stock_symbol(symbol: str) -> bool:
+    """Descarta preferentes, warrants, derechos, unidades y valores en quiebra del Nasdaq (5.ª letra P/W/R/U/Q)."""
+    return not (len(symbol) == 5 and symbol[-1] in "PWRUQ")
 
 
 def mask_account(account_id: str) -> str:
@@ -112,7 +133,7 @@ class BrokerAdapter(Protocol):
 
 
 def build_account(values: Iterable, *, account_id: str, daily_pnl: Decimal | None, quotes: Freshness,
-                  now: datetime) -> AccountSnapshot:
+                  now: datetime, mode: Literal["paper", "live"] = "paper") -> AccountSnapshot:
     """Construye ``AccountSnapshot`` a partir de ``AccountValue`` (account, tag, value, currency)."""
     base: dict[str, Decimal] = {}
     base_currency = None
@@ -160,7 +181,7 @@ def build_account(values: Iterable, *, account_id: str, daily_pnl: Decimal | Non
     unrealized = base.get("UnrealizedPnL", Decimal("0"))
     return AccountSnapshot(
         account_id_masked=mask_account(account_id),
-        mode="paper",
+        mode=mode,
         timestamp=now,
         base_currency=base_currency,
         net_liquidation=Money(amount=_q(nlv), currency=base_currency),
@@ -238,10 +259,15 @@ class IbkrPaperBroker:
     """
 
     def __init__(self, host: str, port: int, client_id: int, *, orders: OrderStore | None = None,
-                 orders_enabled: bool = False):
+                 orders_enabled: bool = False, account_kind: Literal["paper", "real"] = "paper",
+                 allow_real_orders: bool = False):
         self.host, self.port, self.client_id = host, port, client_id
         self.orders = orders
-        self.orders_enabled = orders_enabled and orders is not None
+        self.account_kind = account_kind
+        # Cuenta real: solo lectura salvo que la configuración lo permita de forma explícita.
+        self.orders_enabled = orders_enabled and orders is not None and (
+            account_kind == "paper" or allow_real_orders)
+        self.order_mode = "live" if account_kind == "real" else "paper"
         self._lock = threading.Lock()
         self._snapshot = BrokerSnapshot(link="desconectado", detail="Conectando con IB Gateway…")
         self._stop = threading.Event()
@@ -254,6 +280,11 @@ class IbkrPaperBroker:
     def snapshot(self) -> BrokerSnapshot:
         with self._lock:
             return self._snapshot
+
+    def ready(self) -> bool:
+        """Conectado y con la cuenta identificada."""
+        ib = self._ib
+        return ib is not None and ib.isConnected() and self._account is not None
 
     def _publish(self, snap: BrokerSnapshot) -> None:
         with self._lock:
@@ -293,23 +324,28 @@ class IbkrPaperBroker:
                 ib.cancelMktData(contract)
         return self._call(run)
 
+    def _account_matches(self) -> bool:
+        account = self._account or ""
+        return is_paper_account(account) if self.account_kind == "paper" else bool(account) and not is_paper_account(account)
+
     def submit(self, client_order_id: str) -> None:
-        """Envía a IBKR Paper una orden ya aprobada por riesgo (RISK_APPROVED → SUBMITTING)."""
+        """Envía a IBKR una orden ya confirmada y aprobada por riesgo (RISK_APPROVED → SUBMITTING)."""
         if not self.orders_enabled:
             raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
 
         async def run(ib):
             from ib_async import LimitOrder
 
-            if not is_paper_account(self._account or ""):
-                raise NotPaperAccountError("La cuenta conectada no es Paper.")
+            if not self._account_matches():
+                raise NotPaperAccountError("La cuenta conectada no es la configurada: no se envía.")
             order = self.orders.get(client_order_id)
-            if order is None or order.is_mock or order.mode != "paper" or order.state is not OrderState.RISK_APPROVED:
+            if order is None or order.is_mock or order.mode != self.order_mode or order.state is not OrderState.RISK_APPROVED:
                 raise BrokerUnavailable("La orden no está lista para enviarse.")
             contract = await self._qualify(ib, order.symbol, order.currency)
             ib_order = LimitOrder(order.side.value, float(order.quantity), float(order.limit_price),
                                   account=self._account, orderRef=client_order_id, tif="DAY")
-            self.orders.transition(client_order_id, OrderState.SUBMITTING, "Enviando a IBKR Paper")
+            self.orders.transition(client_order_id, OrderState.SUBMITTING,
+                                   "Enviando a IBKR (cuenta REAL)" if self.order_mode == "live" else "Enviando a IBKR Paper")
             try:
                 trade = ib.placeOrder(contract, ib_order)
             except Exception as exc:
@@ -317,7 +353,60 @@ class IbkrPaperBroker:
                 self.orders.transition(client_order_id, OrderState.UNKNOWN, f"Error al enviar: {exc}")
                 raise
             self.orders.set_broker_ids(client_order_id, trade.order.orderId, trade.order.permId or None)
-            log_event(log, "Orden Paper enviada", client_order_id=client_order_id, order_id=trade.order.orderId)
+            log_event(log, "Orden enviada", client_order_id=client_order_id, order_id=trade.order.orderId,
+                      mode=self.order_mode)
+        self._call(run)
+
+    def submit_protected(self, take_profit_id: str, stop_loss_id: str, parent_id: str | None = None) -> None:
+        """Envía las ventas de ganancia (limitada) y pérdida (stop) enlazadas: si se ejecuta una, IBKR cancela la otra.
+
+        Con ``parent_id`` es una orden bracket: la compra limitada y las dos ventas, que IBKR solo activa
+        cuando la compra se ejecuta. Sin él, protegen acciones que ya tienes (grupo OCA). Las ventas son GTC
+        (siguen en IBKR días después, aunque la app esté cerrada) y solo actúan en horario normal.
+        """
+        if not self.orders_enabled:
+            raise BrokerUnavailable("El envío de órdenes está desactivado en esta configuración.")
+        ids = [i for i in (parent_id, take_profit_id, stop_loss_id) if i]
+
+        async def run(ib):
+            from ib_async import LimitOrder, StopOrder
+
+            if not self._account_matches():
+                raise NotPaperAccountError("La cuenta conectada no es la configurada: no se envía.")
+            records = [self.orders.get(i) for i in ids]
+            if any(r is None or r.is_mock or r.mode != self.order_mode or r.state is not OrderState.RISK_APPROVED
+                   for r in records):
+                raise BrokerUnavailable("La orden no está lista para enviarse.")
+            tp, sl = records[-2], records[-1]
+            contract = await self._qualify(ib, tp.symbol, tp.currency)
+            ib_orders = []
+            if parent_id:
+                parent = records[0]
+                ib_orders.append(LimitOrder(parent.side.value, float(parent.quantity), float(parent.limit_price),
+                                            account=self._account, orderRef=parent_id, tif="DAY",
+                                            orderId=ib.client.getReqId(), transmit=False))
+            link = {"parentId": ib_orders[0].orderId} if parent_id else {"ocaGroup": f"OCA-{take_profit_id}", "ocaType": 1}
+            ib_orders.append(LimitOrder("SELL", float(tp.quantity), float(tp.limit_price), account=self._account,
+                                        orderRef=take_profit_id, tif="GTC", orderId=ib.client.getReqId(),
+                                        transmit=False, **link))
+            # El último lleva transmit=True: IBKR recibe el grupo entero de una vez.
+            ib_orders.append(StopOrder("SELL", float(sl.quantity), float(sl.limit_price), account=self._account,
+                                       orderRef=stop_loss_id, tif="GTC", orderId=ib.client.getReqId(),
+                                       transmit=True, **link))
+            for client_order_id in ids:
+                self.orders.transition(client_order_id, OrderState.SUBMITTING,
+                                       "Enviando a IBKR (cuenta REAL)" if self.order_mode == "live" else "Enviando a IBKR Paper")
+            for client_order_id, ib_order in zip(ids, ib_orders):
+                try:
+                    trade = ib.placeOrder(contract, ib_order)
+                except Exception as exc:
+                    # No sabemos qué llegó: todo el grupo a UNKNOWN y nunca se reenvía solo.
+                    for i in ids:
+                        if self.orders.get(i).state is OrderState.SUBMITTING:
+                            self.orders.transition(i, OrderState.UNKNOWN, f"Error al enviar: {exc}")
+                    raise
+                self.orders.set_broker_ids(client_order_id, trade.order.orderId, trade.order.permId or None)
+            log_event(log, "Órdenes de protección enviadas", orders=ids, mode=self.order_mode)
         self._call(run)
 
     def cancel(self, client_order_id: str) -> None:
@@ -331,6 +420,53 @@ class IbkrPaperBroker:
                     return
             raise BrokerUnavailable("IBKR no tiene esa orden abierta.")
         self._call(run)
+
+    def historical_candles(self, symbol: str, bar_minutes: int, currency: str = "USD"):
+        """Velas OHLCV cerradas de la sesión regular (últimos 5 días) para Kronos. Solo lectura."""
+        from .forecast import Candle  # noqa: PLC0415
+
+        async def run(ib):
+            contract = await self._qualify(ib, symbol, currency)
+            bars = await ib.reqHistoricalDataAsync(
+                contract, endDateTime="", durationStr="5 D", barSizeSetting=f"{bar_minutes} mins",
+                whatToShow="TRADES", useRTH=True, formatDate=2)
+            candles = []
+            for b in bars or []:
+                ts = b.date if isinstance(b.date, datetime) else None
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                candles.append(Candle(ts=ts.astimezone(timezone.utc), open=float(b.open), high=float(b.high),
+                                      low=float(b.low), close=float(b.close), volume=float(max(b.volume, 0))))
+            return candles
+        candles = self._call(run, timeout=60)
+        return candles, self.snapshot().quotes
+
+    def scan_candidates(self, n: int) -> list[tuple[str, str]]:
+        """Candidatos del escáner de mercado de IBKR en el Nasdaq (más volumen y más subida del día). Solo lectura."""
+        scans = (("HOT_BY_VOLUME", "Volumen inusual hoy en el Nasdaq (escáner de IBKR)"),
+                 ("TOP_PERC_GAIN", "Entre las que más suben hoy en el Nasdaq (escáner de IBKR)"))
+
+        async def run(ib):
+            from ib_async import ScannerSubscription  # noqa: PLC0415
+
+            out: list[tuple[str, str]] = []
+            for code, why in scans:
+                # Solo empresas conocidas y líquidas: capitalización > 2000 M$ (IB la expresa en millones),
+                # precio > 10 $ y más de 1 millón de acciones negociadas hoy.
+                sub = ScannerSubscription(instrument="STK", locationCode="STK.NASDAQ", scanCode=code,
+                                          abovePrice=10, aboveVolume=1_000_000, marketCapAbove=2000,
+                                          stockTypeFilter="CORP", numberOfRows=n)  # solo empresas, sin ETF
+                for row in await ib.reqScannerDataAsync(sub) or []:
+                    symbol = row.contractDetails.contract.symbol
+                    if symbol and is_common_stock_symbol(symbol) and symbol not in {s for s, _ in out}:
+                        out.append((symbol, why))
+            return out
+        return self._call(run, timeout=30)[:n]
+
+    def current_positions(self) -> list[Position]:
+        return list(self.snapshot().positions)
 
     async def _qualify(self, ib, symbol: str, currency: str):
         from ib_async import Stock
@@ -360,27 +496,34 @@ class IbkrPaperBroker:
                 await ib.connectAsync(self.host, self.port, clientId=self.client_id,
                                       readonly=not self.orders_enabled, timeout=8, fetchFields=fetch)
                 accounts = ib.managedAccounts()
-                if not accounts or not all(is_paper_account(a) for a in accounts):
+                if not accounts:
+                    raise ConnectionError("IB Gateway no ha indicado ninguna cuenta")
+                if self.account_kind == "paper" and not all(is_paper_account(a) for a in accounts):
                     raise NotPaperAccountError(
-                        "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: esta versión solo "
-                        "admite Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
+                        "La sesión de IB Gateway no es de una cuenta Paper. Conexión cerrada: la app está configurada "
+                        "para Paper. Inicia sesión en IB Gateway eligiendo «Negociación simulada».")
+                if self.account_kind == "real" and any(is_paper_account(a) for a in accounts):
+                    raise NotPaperAccountError(
+                        "La app está configurada para tu cuenta real, pero IB Gateway tiene abierta una sesión Paper. "
+                        "Inicia sesión con tu usuario real.")
                 attempt = 0
                 self._account = accounts[0]
                 if self.orders_enabled:
                     self._watch_orders(ib)
                 self._ib = ib
                 log_event(log, "Conectado a IB Gateway", port=self.port, account=accounts[0],
-                          orders=self.orders_enabled)
+                          kind=self.account_kind, orders=self.orders_enabled)
                 await self._poll(ib, accounts[0])
             except NotPaperAccountError as exc:
-                log_event(log, "Cuenta no Paper: conexión rechazada", logging.ERROR)
+                log_event(log, "Tipo de cuenta distinto del configurado: conexión rechazada", logging.ERROR)
                 self._publish(BrokerSnapshot(link="desconectado", detail=str(exc)))
                 ib.disconnect()
                 return
             except Exception as exc:  # noqa: BLE001 - cualquier fallo de red se reintenta
                 log_event(log, "Sin conexión con IB Gateway", logging.WARNING, error=str(exc), port=self.port)
+                session = "de tu cuenta real" if self.account_kind == "real" else "Paper"
                 detail = (f"No se puede conectar con IB Gateway en {self.host}:{self.port}. Comprueba que está "
-                          "abierto, con la sesión Paper iniciada y la API activada.")
+                          f"abierto, con la sesión {session} iniciada y la API activada.")
                 self._publish(BrokerSnapshot(link="reconectando" if attempt else "desconectado", detail=detail))
             finally:
                 self._ib = None
@@ -409,7 +552,7 @@ class IbkrPaperBroker:
             if trade.order.orderRef:
                 known.add(trade.order.orderRef)
                 self._sync_trade(trade)
-        changed = mark_missing_as_unknown(self.orders, known)
+        changed = mark_missing_as_unknown(self.orders, known, mode=self.order_mode)
         if changed:
             log_event(log, "Órdenes sin confirmar tras reconectar", logging.WARNING, orders=changed)
 
@@ -455,16 +598,23 @@ class IbkrPaperBroker:
                       for cid, t in tickers.items()}
             freshness = overall_freshness(quotes.values())
             now = datetime.now(timezone.utc)
-            mode = "conexión con envío de órdenes Paper" if self.orders_enabled else "conexión de solo lectura"
+            if not self.orders_enabled:
+                mode = "conexión de solo lectura"
+            elif self.order_mode == "live":
+                mode = "órdenes REALES con confirmación"
+            else:
+                mode = "conexión con envío de órdenes Paper"
+            label = "cuenta REAL" if self.account_kind == "real" else "Paper"
             try:
                 account = build_account(ib.accountValues(account_id), account_id=account_id,
-                                        daily_pnl=to_decimal(pnl.dailyPnL), quotes=freshness, now=now)
+                                        daily_pnl=to_decimal(pnl.dailyPnL), quotes=freshness, now=now,
+                                        mode="paper" if is_paper_account(account_id) else "live")
             except ValueError as exc:
                 self._publish(BrokerSnapshot(link="conectado", detail=str(exc), quotes=freshness, updated_at=now))
             else:
                 self._publish(BrokerSnapshot(
                     link="conectado",
-                    detail=f"IB Gateway Paper ({self.host}:{self.port}), {mode}",
+                    detail=f"IB Gateway {label} ({self.host}:{self.port}), {mode}",
                     account=account,
                     positions=build_positions(items, quotes),
                     quotes=freshness,

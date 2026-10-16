@@ -219,6 +219,20 @@ public struct OrderRecord: Codable, Hashable, Identifiable, Sendable {
     public let ibkrOrderId: Int?
     public let ibkrPermId: Int?
     public let note: String?
+    /// "LMT" limitada o "STP" stop (en un stop, `limitPrice` es el precio de disparo).
+    public let orderType: String?
+    /// Ventas de protección que cuelgan de una compra (orden bracket).
+    public let parentClientOrderId: String?
+
+    public var isStop: Bool { orderType == "STP" }
+    public var isTakeProfit: Bool { side == "SELL" && !isStop && clientOrderId.hasSuffix("-TP") }
+
+    /// «Compra», «Venta», «Venta · ganancia» o «Venta · stop».
+    public var sideLabel: String {
+        if side == "BUY" { return "Compra" }
+        if isStop { return "Venta · stop" }
+        return isTakeProfit ? "Venta · ganancia" : "Venta"
+    }
 }
 
 public struct OrderEvent: Codable, Hashable, Sendable {
@@ -255,6 +269,25 @@ public struct SystemStatus: Codable, Hashable, Sendable {
     public let maxOrderValue: Money?
 }
 
+/// Estado de Kronos-small en el servicio local (`GET /v1/model`).
+public struct ModelStatus: Codable, Hashable, Sendable {
+    public let installed: Bool
+    public let loaded: Bool
+    public let modelId: String
+    public let version: String?
+    public let device: String?
+    public let detail: String
+    public let lastLatencyMs: Int?
+    public let lastRun: Date?
+    public let watchlist: [String]
+
+    /// Texto corto para la pantalla de Configuración.
+    public var summary: String {
+        if loaded { return "Funcionando" + (device.map { " (\($0))" } ?? "") }
+        return installed ? "Instalado" : "No instalado"
+    }
+}
+
 /// Orden limitada para la cuenta Paper de IBKR. Solo se envía tras la confirmación del usuario.
 public struct PaperOrderRequest: Encodable, Sendable {
     public let clientOrderId: String
@@ -264,9 +297,13 @@ public struct PaperOrderRequest: Encodable, Sendable {
     public let limitPrice: String
     public let currency: String
     public let confirmed: Bool
+    /// Solo en compras: venta automática de ganancia máxima y stop de pérdida máxima (nil = sin ellas).
+    public let takeProfitPrice: String?
+    public let stopLossPrice: String?
 
     public init(symbol: String, side: String, quantity: Int, limitPrice: Decimal, currency: String = "USD",
-                confirmed: Bool, clientOrderId: String = SimulatedOrderRequest.newClientOrderId()) {
+                confirmed: Bool, clientOrderId: String = SimulatedOrderRequest.newClientOrderId(),
+                protection: Protection? = nil) {
         self.clientOrderId = clientOrderId
         self.symbol = symbol.uppercased()
         self.side = side
@@ -274,7 +311,80 @@ public struct PaperOrderRequest: Encodable, Sendable {
         self.limitPrice = NSDecimalNumber(decimal: limitPrice).stringValue
         self.currency = currency
         self.confirmed = confirmed
+        self.takeProfitPrice = protection.map { NSDecimalNumber(decimal: $0.takeProfit).stringValue }
+        self.stopLossPrice = protection.map { NSDecimalNumber(decimal: $0.stopLoss).stringValue }
     }
+}
+
+/// Precios de la venta de ganancia máxima y del stop de pérdida máxima, a partir de un precio y dos porcentajes.
+public struct Protection: Hashable, Sendable {
+    public let takeProfit: Decimal
+    public let stopLoss: Decimal
+
+    public init(takeProfit: Decimal, stopLoss: Decimal) {
+        self.takeProfit = takeProfit
+        self.stopLoss = stopLoss
+    }
+
+    /// Redondea a céntimos: la ganancia hacia abajo y el stop hacia arriba, para no pasarse de los porcentajes.
+    public init(entry: Decimal, gainPct: Decimal, lossPct: Decimal) {
+        takeProfit = Self.round(entry * (1 + gainPct / 100), .down)
+        stopLoss = Self.round(entry * (1 - lossPct / 100), .up)
+    }
+
+    /// Lo que se perdería, como mucho, si salta el stop a su precio (sin contar deslizamiento ni comisiones).
+    public func maxLoss(entry: Decimal, quantity: Int) -> Decimal { (entry - stopLoss) * Decimal(quantity) }
+    public func maxGain(entry: Decimal, quantity: Int) -> Decimal { (takeProfit - entry) * Decimal(quantity) }
+
+    static func round(_ value: Decimal, _ mode: NSDecimalNumber.RoundingMode) -> Decimal {
+        var input = value
+        var output = Decimal()
+        NSDecimalRound(&output, &input, 2, mode)
+        return output
+    }
+}
+
+/// Protege acciones que ya tienes (`/v1/orders/protect`).
+public struct ProtectRequest: Encodable, Sendable {
+    public let clientOrderId: String
+    public let symbol: String
+    public let quantity: String
+    public let takeProfitPrice: String
+    public let stopLossPrice: String
+    public let currency: String
+    public let confirmed: Bool
+
+    public init(symbol: String, quantity: Int, protection: Protection, currency: String = "USD", confirmed: Bool,
+                clientOrderId: String = SimulatedOrderRequest.newClientOrderId()) {
+        self.clientOrderId = clientOrderId
+        self.symbol = symbol.uppercased()
+        self.quantity = String(quantity)
+        self.takeProfitPrice = NSDecimalNumber(decimal: protection.takeProfit).stringValue
+        self.stopLossPrice = NSDecimalNumber(decimal: protection.stopLoss).stringValue
+        self.currency = currency
+        self.confirmed = confirmed
+    }
+}
+
+/// Tu lista de seguimiento (`/v1/watchlist`).
+public struct Watchlist: Codable, Hashable, Sendable {
+    public let symbols: [String]
+    public let max: Int
+}
+
+/// Tope por orden real en euros (`/v1/order-limit`). Los importes llegan como texto decimal.
+public struct OrderLimit: Codable, Hashable, Sendable {
+    public let maxRealOrderEur: String
+    public let ceilingEur: String
+    public let realTrading: Bool
+}
+
+/// De dónde salen las velas que analiza Kronos: IBKR o Alpaca (tiempo real IEX gratuito).
+public struct DataProvider: Codable, Hashable, Sendable {
+    public let provider: String
+    public let configured: Bool
+    public let keyIdMasked: String?
+    public let detail: String
 }
 
 public struct SimulatedOrderRequest: Encodable, Sendable {

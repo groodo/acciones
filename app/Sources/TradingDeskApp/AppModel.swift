@@ -32,6 +32,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var orders: [OrderRecord] = []
     @Published private(set) var curve: EquityCurve?
     @Published private(set) var killSwitch: KillSwitchState?
+    @Published private(set) var modelStatus: ModelStatus?
+    @Published private(set) var opportunities: [Signal] = []
+    @Published private(set) var opportunitiesNotice: String?
+    @Published private(set) var watchlist: [String] = []
+    @Published private(set) var orderLimit: OrderLimit?
+    @Published private(set) var dataProvider: DataProvider?
     @Published var curveRange: String = "30d"
     /// Verdadero si alguna de las respuestas mostradas está marcada como simulada por el servicio.
     @Published private(set) var isMock = true
@@ -86,8 +92,8 @@ final class AppModel: ObservableObject {
                 positions = p.data
                 flags += [a.isMock, p.isMock]
                 accountUnavailable = nil
-                notice = a.isMock ? a.notice
-                    : "Saldo y posiciones: cuenta Paper de IBKR. Señales, curva y órdenes: DATOS SIMULADOS."
+                let cuenta = s.data.mode == "live" ? "tu cuenta REAL de IBKR (solo lectura)" : "cuenta Paper de IBKR"
+                notice = a.isMock ? a.notice : "Datos de \(cuenta). Señales: Kronos-small en tu Mac."
             } catch let error as APIError {
                 guard case .http(503, let detail) = error else { throw error }
                 account = nil
@@ -100,6 +106,15 @@ final class AppModel: ObservableObject {
             orders = o.data
             killSwitch = k.data
             curve = c.data
+            // El estado de Kronos es informativo: si falla, no se tumba el resto de la pantalla.
+            modelStatus = try? await client.modelStatus()
+            if let opp = try? await client.opportunities() {
+                opportunities = opp.data
+                opportunitiesNotice = opp.notice
+            }
+            if let w = try? await client.watchlist() { watchlist = w.symbols }
+            orderLimit = try? await client.orderLimit()
+            dataProvider = try? await client.dataProvider()
             isMock = flags.contains(true)
             serviceError = nil
             lastRefresh = Date()
@@ -151,8 +166,11 @@ final class AppModel: ObservableObject {
 
     /// Borrador para la hoja de nueva orden Paper (nil = cerrada).
     @Published var paperOrderDraft: PaperOrderDraft?
+    @Published var protectDraft: ProtectDraft?
 
     var canSendPaperOrders: Bool { status?.tradingAllowed == true && status?.maxOrderValue != nil }
+    /// Cuenta real con órdenes habilitadas: las órdenes mueven dinero real.
+    var isRealTrading: Bool { status?.mode == "live" && canSendPaperOrders }
 
     func openPaperOrder(symbol: String = "", side: String = "BUY", price: Decimal? = nil) {
         paperOrderDraft = PaperOrderDraft(symbol: symbol, side: side, quantity: 1, limitPrice: price)
@@ -162,13 +180,94 @@ final class AppModel: ObservableObject {
     func sendPaperOrder(_ draft: PaperOrderDraft) async -> String? {
         guard let price = draft.limitPrice else { return "Indica un precio límite." }
         do {
-            let order = try await client.createPaperOrder(PaperOrderRequest(
+            let request = PaperOrderRequest(
                 symbol: draft.symbol, side: draft.side, quantity: draft.quantity, limitPrice: price,
-                confirmed: true, clientOrderId: draft.clientOrderId
-            )).data
-            actionMessage = "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
+                confirmed: true, clientOrderId: draft.clientOrderId, protection: draft.protection(entry: price)
+            )
+            let real = isRealTrading
+            let order: OrderRecord
+            if real {
+                order = try await client.createRealOrder(request).data
+            } else {
+                order = try await client.createPaperOrder(request).data
+            }
+            actionMessage = real
+                ? "Orden REAL \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero real."
+                : "Orden Paper \(order.clientOrderId) enviada a IBKR: \(order.state.label). Dinero ficticio."
             paperOrderDraft = nil
             await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func openProtect(_ position: Position) {
+        // Solo acciones enteras: la API de IBKR no admite stops sobre fracciones de acción.
+        let free = Self.wholeShares(position)
+        guard free >= 1 else { return }
+        protectDraft = ProtectDraft(symbol: position.symbol, currency: position.currency, maxQuantity: free,
+                                    quantity: free, price: position.lastPrice.value)
+    }
+
+    static func wholeShares(_ position: Position) -> Int {
+        var value = position.quantity.value
+        var whole = Decimal()
+        NSDecimalRound(&whole, &value, 0, .down)
+        return Int(truncating: NSDecimalNumber(decimal: whole))
+    }
+
+    /// Envía la venta de ganancia y el stop de pérdida ya confirmados. Devuelve nil si fue bien.
+    func sendProtect(_ draft: ProtectDraft) async -> String? {
+        do {
+            let request = ProtectRequest(symbol: draft.symbol, quantity: draft.quantity, protection: draft.protection,
+                                         currency: draft.currency, confirmed: true, clientOrderId: draft.clientOrderId)
+            _ = try await client.protectPosition(request)
+            actionMessage = "\(draft.symbol) protegida en IBKR: venta a \(Fmt.money(draft.protection.takeProfit, currency: draft.currency)) "
+                + "o stop a \(Fmt.money(draft.protection.stopLoss, currency: draft.currency)); si se ejecuta una, se cancela la otra."
+            protectDraft = nil
+            await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Guarda tu lista de seguimiento. Devuelve nil si fue bien, o el motivo del rechazo.
+    func saveWatchlist(_ symbols: [String]) async -> String? {
+        do {
+            watchlist = try await client.setWatchlist(symbols).symbols
+            actionMessage = "Lista actualizada: Kronos la analizará en el próximo ciclo (cada 5 minutos)."
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Cambia el tope por orden real (en euros).
+    func saveOrderLimit(_ eur: Decimal) async -> String? {
+        do {
+            orderLimit = try await client.setOrderLimit(eur: eur)
+            await refresh()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Guarda las claves de Alpaca (el servicio las valida antes). Devuelve nil si fue bien.
+    func saveAlpacaKeys(keyId: String, secretKey: String) async -> String? {
+        do {
+            dataProvider = try await client.setAlpacaKeys(keyId: keyId, secretKey: secretKey)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func deleteAlpacaKeys() async -> String? {
+        do {
+            dataProvider = try await client.deleteAlpacaKeys()
             return nil
         } catch {
             return error.localizedDescription
@@ -195,4 +294,27 @@ struct PaperOrderDraft: Identifiable, Equatable {
     var side: String
     var quantity: Int
     var limitPrice: Decimal?
+    /// Solo en compras: añadir venta automática de ganancia máxima y stop de pérdida máxima.
+    var protect = true
+    var gainPct: Decimal = 2
+    var lossPct: Decimal = 1
+
+    func protection(entry: Decimal) -> Protection? {
+        side == "BUY" && protect ? Protection(entry: entry, gainPct: gainPct, lossPct: lossPct) : nil
+    }
+}
+
+struct ProtectDraft: Identifiable, Equatable {
+    let id = UUID()
+    let clientOrderId = SimulatedOrderRequest.newClientOrderId()
+    let symbol: String
+    let currency: String
+    let maxQuantity: Int
+    var quantity: Int
+    /// Precio actual: los porcentajes se calculan sobre él.
+    let price: Decimal
+    var gainPct: Decimal = 2
+    var lossPct: Decimal = 1
+
+    var protection: Protection { Protection(entry: price, gainPct: gainPct, lossPct: lossPct) }
 }

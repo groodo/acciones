@@ -33,3 +33,39 @@ def test_ipv6_loopback_allowed(tmp_path):
 def test_ibkr_paper_defaults_to_gateway_paper_port(tmp_path):
     s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr"})
     assert (s.data_source, s.mode, s.ib_host, s.ib_port) == ("ibkr", "paper", "127.0.0.1", 4002)
+
+
+def test_real_account_is_read_only_and_uses_live_gateway_port(tmp_path):
+    s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_ACCOUNT": "real-readonly", "TRADINGDESK_PAPER_ORDERS": "1"})
+    assert s.real_account and s.paper_orders is False and s.ib_port == 4001 and s.mode == "paper"
+
+
+def test_real_account_can_be_chosen_with_a_file_in_the_data_dir(tmp_path):
+    (tmp_path / "ib-account").write_text("real-readonly\n")
+    s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_PORT": "7496"})
+    assert s.real_account and s.ib_port == 7496 and not s.paper_orders
+    # Sin fuente IBKR el archivo no tiene efecto.
+    assert not Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path)}).real_account
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"ib_account": "real"},
+    {"ib_account": "real-readonly", "paper_orders": True},
+    {"ib_account": "real-trading", "paper_orders": True},
+    {"ib_account": "real-trading", "paper_orders": False, "max_real_order_eur": __import__("decimal").Decimal("1001")},
+])
+def test_real_account_never_with_orders(tmp_path, kwargs):
+    with pytest.raises(ConfigError):
+        Settings(data_dir=tmp_path, data_source="ibkr", **kwargs).validate()
+
+
+def test_real_trading_has_a_euro_cap_of_at_most_1000(tmp_path):
+    s = Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_ACCOUNT": "real-trading"})
+    assert s.real_trading and s.real_account and not s.paper_orders and s.ib_port == 4001
+    assert s.max_real_order_eur == 1000
+    with pytest.raises(ConfigError):
+        Settings.from_env({"TRADINGDESK_DATA_DIR": str(tmp_path), "TRADINGDESK_DATA_SOURCE": "ibkr",
+                           "TRADINGDESK_IB_ACCOUNT": "real-trading", "TRADINGDESK_MAX_REAL_ORDER_EUR": "5000"})

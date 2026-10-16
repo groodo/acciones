@@ -81,6 +81,8 @@ def _row_to_order(row) -> OrderRecord:
         ibkr_order_id=row["ibkr_order_id"],
         ibkr_perm_id=row["ibkr_perm_id"],
         note=row["note"],
+        order_type=row["order_type"],
+        parent_client_order_id=row["parent_client_order_id"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
@@ -134,10 +136,16 @@ class OrderStore:
         currency: str,
         note: str | None = None,
         created_at: datetime | None = None,
+        allow_live: bool = False,
+        order_type: str = "LMT",
+        parent_client_order_id: str | None = None,
     ) -> tuple[OrderRecord, bool]:
-        """Crea un DRAFT. Idempotente por ``client_order_id``: devuelve (orden, creada)."""
-        if mode != "paper":
-            raise TradingBlocked("Solo se admiten órdenes Paper en esta versión")
+        """Crea un DRAFT. Idempotente por ``client_order_id``: devuelve (orden, creada).
+
+        Las órdenes ``live`` solo se admiten cuando el servicio está configurado con la cuenta real con órdenes.
+        """
+        if mode != "paper" and not (mode == "live" and allow_live and not is_mock):
+            raise TradingBlocked("Las órdenes reales no están habilitadas en esta configuración")
         at = (created_at or _now()).isoformat()
         with self.db.transaction() as conn:
             existing = conn.execute(
@@ -153,10 +161,10 @@ class OrderStore:
                 return order, False
             conn.execute(
                 """INSERT INTO orders (client_order_id, mode, is_mock, symbol, side, quantity, limit_price,
-                       currency, state, note, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       currency, state, note, created_at, updated_at, order_type, parent_client_order_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (client_order_id, mode, int(is_mock), symbol, side.value, str(quantity), str(limit_price),
-                 currency, S.DRAFT.value, note, at, at),
+                 currency, S.DRAFT.value, note, at, at, order_type, parent_client_order_id),
             )
             conn.execute(
                 "INSERT INTO order_events (client_order_id, from_state, to_state, reason, at) VALUES (?, NULL, ?, ?, ?)",

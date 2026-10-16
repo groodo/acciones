@@ -35,10 +35,12 @@ struct OperacionesView: View {
                 Button {
                     model.openPaperOrder()
                 } label: {
-                    Label("Nueva orden Paper", systemImage: "plus.circle")
+                    Label(model.isRealTrading ? "Nueva orden REAL" : "Nueva orden Paper", systemImage: "plus.circle")
                 }
                 .disabled(!model.canSendPaperOrders)
-                .help(model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
+                .help(model.isRealTrading ? "Orden limitada en tu cuenta REAL de IBKR (dinero real)"
+                      : model.canSendPaperOrders ? "Orden limitada en la cuenta de práctica de IBKR"
+                      : model.status?.mode == "live" ? "Cuenta real conectada en solo lectura: no se envían órdenes"
                       : "Requiere IB Gateway conectado en Negociación simulada y la operativa no detenida")
             }
 
@@ -75,9 +77,9 @@ struct OrdersTable: View {
             }
             TableColumn("Origen") { (o: OrderRecord) in Text(o.isMock ? "SIMULADA" : o.mode.uppercased()) }
             TableColumn("Símbolo") { (o: OrderRecord) in Text(o.symbol) }
-            TableColumn("Lado") { (o: OrderRecord) in Text(o.side == "BUY" ? "Compra" : "Venta") }
+            TableColumn("Lado") { (o: OrderRecord) in Text(o.sideLabel) }
             TableColumn("Unidades") { (o: OrderRecord) in Text(Self.units(o)) }
-            TableColumn("Límite") { (o: OrderRecord) in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
+            TableColumn("Límite / stop") { (o: OrderRecord) in Text(Fmt.money(o.limitPrice.value, currency: o.currency)) }
             TableColumn("Precio medio") { (o: OrderRecord) in Text(Self.avgPrice(o)) }
             TableColumn("Comisión") { (o: OrderRecord) in Text(o.commission.map { Fmt.money($0) } ?? "Pendiente de confirmación") }
             TableColumn("Estado") { (o: OrderRecord) in Text(o.state.label) }
