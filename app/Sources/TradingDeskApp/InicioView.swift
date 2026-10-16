@@ -70,6 +70,17 @@ struct InicioView: View {
 struct EquityChartCard: View {
     @EnvironmentObject var model: AppModel
 
+    /// Inicio del eje: el periodo elegido entero, para que se vea qué parte tiene datos.
+    static func periodStart(_ range: String, first: Date) -> Date {
+        let now = Date()
+        switch range {
+        case "hoy": return Calendar.current.startOfDay(for: now)
+        case "7d": return now.addingTimeInterval(-7 * 86_400)
+        case "30d": return now.addingTimeInterval(-30 * 86_400)
+        default: return min(first, now.addingTimeInterval(-3_600))
+        }
+    }
+
     var body: some View {
         MetricCard(title: "Patrimonio (EUR)", systemImage: "chart.line.uptrend.xyaxis",
                    footnote: "Las aportaciones y retiradas se registran aparte y no cuentan como rentabilidad.") {
@@ -98,7 +109,11 @@ struct EquityChartCard: View {
                     }
                 }
                 .chartYScale(domain: .automatic(includesZero: false))
+                .chartXScale(domain: Self.periodStart(model.curveRange, first: curve.points[0].timestamp)...Date())
                 .frame(height: 220)
+                // El histórico empieza cuando la app empezó a guardar el valor de tu cuenta: antes no hay datos.
+                Text("Datos desde \(Fmt.dateTime(curve.points[0].timestamp)).")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 // Nunca se dibuja una curva artificial.
                 Text(model.curve?.message ?? "Datos insuficientes")
