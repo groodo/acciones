@@ -108,6 +108,15 @@ final class ClientTests: XCTestCase {
         }
     }
 
+    func testModelStatusDecodes() async throws {
+        let body = #"{"installed":true,"loaded":true,"model_id":"NeoQuasar/Kronos-small","version":"v1","device":"mps","detail":"Cargado","last_latency_ms":5500,"last_run":"2026-10-16T16:30:00.123456+00:00","watchlist":["AAPL","SPY"]}"#
+        let client = APIClient(config: config, transport: StubTransport(status: 200, body: body), tokenProvider: { "abc" })
+        let status = try await client.modelStatus()
+        XCTAssertEqual(status.summary, "Funcionando (mps)")
+        XCTAssertEqual(status.lastLatencyMs, 5500)
+        XCTAssertNotNil(status.lastRun)
+    }
+
     func testKillSwitchBlockSurfacesMessage() async {
         let body = #"{"detail":"Operativa detenida: no se aceptan nuevas entradas."}"#
         let client = APIClient(config: config, transport: StubTransport(status: 423, body: body), tokenProvider: { "abc" })

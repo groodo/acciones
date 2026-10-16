@@ -25,17 +25,27 @@ struct ConfiguracionView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modo de operativa") {
-                LabeledContent("Modo", value: "Paper (cuenta de práctica)")
+                LabeledContent("Modo", value: model.status?.mode == "live"
+                               ? "Cuenta REAL en solo lectura (no se envían órdenes)" : "Paper (cuenta de práctica)")
                 if let cap = model.status?.maxOrderValue {
                     LabeledContent("Órdenes Paper", value: "Habilitadas · tope \(Fmt.money(cap)) por orden")
                 } else {
                     LabeledContent("Órdenes Paper", value: "No habilitadas")
                 }
-                Text("El modo real está bloqueado en el servicio: no existe proceso de habilitación en esta versión, y cambiar la interfaz o un archivo local no lo activa.")
+                Text("El envío de órdenes con dinero real no existe en el servicio: la cuenta real solo se puede conectar en modo lectura.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SwiftUI.Section("Modelo") {
-                LabeledContent("Kronos-small", value: "No instalado (Hito C)")
+                if let m = model.modelStatus {
+                    LabeledContent("Kronos-small", value: m.summary)
+                    if let version = m.version { LabeledContent("Versión", value: version) }
+                    if let ms = m.lastLatencyMs { LabeledContent("Última previsión", value: "\(ms) ms") }
+                    if let run = m.lastRun { LabeledContent("Último análisis", value: Fmt.dateTime(run)) }
+                    LabeledContent("Acciones analizadas", value: m.watchlist.joined(separator: ", "))
+                    Text(m.detail).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("Kronos-small", value: "Sin datos del servicio")
+                }
             }
             SwiftUI.Section("Detener operativa") {
                 LabeledContent("Estado", value: model.killSwitch?.active == true ? "Detenida" : "Habilitada (simulación)")

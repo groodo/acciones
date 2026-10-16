@@ -255,6 +255,25 @@ public struct SystemStatus: Codable, Hashable, Sendable {
     public let maxOrderValue: Money?
 }
 
+/// Estado de Kronos-small en el servicio local (`GET /v1/model`).
+public struct ModelStatus: Codable, Hashable, Sendable {
+    public let installed: Bool
+    public let loaded: Bool
+    public let modelId: String
+    public let version: String?
+    public let device: String?
+    public let detail: String
+    public let lastLatencyMs: Int?
+    public let lastRun: Date?
+    public let watchlist: [String]
+
+    /// Texto corto para la pantalla de Configuración.
+    public var summary: String {
+        if loaded { return "Funcionando" + (device.map { " (\($0))" } ?? "") }
+        return installed ? "Instalado" : "No instalado"
+    }
+}
+
 /// Orden limitada para la cuenta Paper de IBKR. Solo se envía tras la confirmación del usuario.
 public struct PaperOrderRequest: Encodable, Sendable {
     public let clientOrderId: String

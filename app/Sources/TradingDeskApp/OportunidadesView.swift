@@ -8,7 +8,9 @@ struct OportunidadesView: View {
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Señales de ejemplo: no proceden de ningún modelo. Kronos llegará en el Hito C.")
+                Text(model.signals.contains { $0.modelVersion != nil } || model.modelStatus?.installed == true
+                     ? "Previsiones de Kronos-small en tu Mac. No son probabilidades calibradas ni una recomendación."
+                     : "Señales de ejemplo: no proceden de ningún modelo.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Table(model.signals, selection: $selection) {

@@ -93,6 +93,7 @@ public final class APIClient: Sendable {
     public func signals() async throws -> Envelope<[Signal]> { try await get("/v1/signals") }
     public func orders() async throws -> Envelope<[OrderRecord]> { try await get("/v1/orders") }
     public func killSwitch() async throws -> Envelope<KillSwitchState> { try await get("/v1/kill-switch") }
+    public func modelStatus() async throws -> ModelStatus { try await get("/v1/model") }
 
     public func equityCurve(range: String) async throws -> Envelope<EquityCurve> {
         try await get("/v1/equity-curve", query: [URLQueryItem(name: "range", value: range)])

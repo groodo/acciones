@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var orders: [OrderRecord] = []
     @Published private(set) var curve: EquityCurve?
     @Published private(set) var killSwitch: KillSwitchState?
+    @Published private(set) var modelStatus: ModelStatus?
     @Published var curveRange: String = "30d"
     /// Verdadero si alguna de las respuestas mostradas está marcada como simulada por el servicio.
     @Published private(set) var isMock = true
@@ -86,8 +87,10 @@ final class AppModel: ObservableObject {
                 positions = p.data
                 flags += [a.isMock, p.isMock]
                 accountUnavailable = nil
+                let cuenta = s.data.mode == "live" ? "tu cuenta REAL de IBKR (solo lectura)" : "cuenta Paper de IBKR"
+                let senales = sg.isMock ? "SIMULADAS" : "Kronos-small"
                 notice = a.isMock ? a.notice
-                    : "Saldo y posiciones: cuenta Paper de IBKR. Señales, curva y órdenes: DATOS SIMULADOS."
+                    : "Saldo y posiciones: \(cuenta). Señales: \(senales). Curva de patrimonio: DATOS SIMULADOS."
             } catch let error as APIError {
                 guard case .http(503, let detail) = error else { throw error }
                 account = nil
@@ -100,6 +103,8 @@ final class AppModel: ObservableObject {
             orders = o.data
             killSwitch = k.data
             curve = c.data
+            // El estado de Kronos es informativo: si falla, no se tumba el resto de la pantalla.
+            modelStatus = try? await client.modelStatus()
             isMock = flags.contains(true)
             serviceError = nil
             lastRefresh = Date()
