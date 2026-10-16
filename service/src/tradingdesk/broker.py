@@ -37,6 +37,16 @@ log = logging.getLogger("tradingdesk.broker")
 # ib_async registra cada intento fallido como ERROR; ya lo resume nuestro aviso de reconexión.
 logging.getLogger("ib_async.client").setLevel(logging.CRITICAL)
 
+
+class _ScannerCancelNoise(logging.Filter):
+    """IBKR responde con el error 162 al cerrar cada escaneo terminado: es normal, no un fallo."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "scanner subscription cancelled" not in record.getMessage()
+
+
+logging.getLogger("ib_async.wrapper").addFilter(_ScannerCancelNoise())
+
 CENT = Decimal("0.01")
 REFRESH_SECONDS = 5
 RECONNECT_SECONDS = (2, 5, 10, 30)
@@ -386,8 +396,11 @@ class IbkrPaperBroker:
 
             out: list[tuple[str, str]] = []
             for code, why in scans:
+                # Solo empresas conocidas y líquidas: capitalización > 2000 M$ (IB la expresa en millones),
+                # precio > 10 $ y más de 1 millón de acciones negociadas hoy.
                 sub = ScannerSubscription(instrument="STK", locationCode="STK.NASDAQ", scanCode=code,
-                                          abovePrice=5, aboveVolume=500_000, numberOfRows=n)
+                                          abovePrice=10, aboveVolume=1_000_000, marketCapAbove=2000,
+                                          numberOfRows=n)
                 for row in await ib.reqScannerDataAsync(sub) or []:
                     symbol = row.contractDetails.contract.symbol
                     if symbol and symbol not in {s for s, _ in out}:
