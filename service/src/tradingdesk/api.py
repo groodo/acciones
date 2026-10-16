@@ -46,7 +46,9 @@ from .logging_setup import log_event
 from .mock_data import MOCK_NOTICE, MockProvider, seed_mock_orders
 from .orders import OrderError, OrderStore
 from .paper_orders import PaperOrderRequest, RiskRejection, check_order_limits, check_price_band
+from .model_runner import Forecaster, KronosForecaster
 from .safety import KillSwitch, market_is_open
+from .signal_engine import SignalEngine
 
 log = logging.getLogger("tradingdesk.api")
 
@@ -74,7 +76,8 @@ def load_or_create_token(path: Path) -> str:
 
 
 def create_app(settings: Settings, *, token: str | None = None, provider: MockProvider | None = None,
-               db: Database | None = None, broker: BrokerAdapter | None = None) -> FastAPI:
+               db: Database | None = None, broker: BrokerAdapter | None = None,
+               forecaster: Forecaster | None = None) -> FastAPI:
     settings.validate()
     db = db or Database(settings.db_path)
     db.migrate()
@@ -88,12 +91,21 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                                  orders_enabled=settings.paper_orders)
     if broker is None:
         _record_snapshot(db, provider.account())
+    engine: SignalEngine | None = None
+    forecaster = forecaster or KronosForecaster(settings.kronos_dir)
+    if broker is not None and hasattr(broker, "historical_candles"):
+        engine = SignalEngine(db, broker, forecaster, list(settings.watchlist),
+                              interval_s=settings.signal_interval_s)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if broker is not None:
             broker.start()
+        if engine is not None:
+            engine.start()
         yield
+        if engine is not None:
+            engine.stop()
         if broker is not None:
             broker.stop()
 
@@ -101,6 +113,7 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
                   lifespan=lifespan)
     app.state.db = db
     app.state.broker = broker
+    app.state.engine = engine
 
     def envelope(data, notice: str = MOCK_NOTICE) -> Envelope:
         return Envelope(source="MOCK", is_mock=True, mode=settings.mode,
@@ -212,8 +225,21 @@ def create_app(settings: Settings, *, token: str | None = None, provider: MockPr
 
     @app.get("/v1/signals", response_model=Envelope[list[Signal]])
     def signals():
+        if engine is not None:
+            st = forecaster.status()
+            notice = ("Previsiones de Kronos-small (local). Las frecuencias de las muestras no son probabilidades "
+                      "calibradas ni una recomendación.") if st.installed else st.detail
+            return ibkr_envelope(engine.signals(), notice)
         return envelope(provider.signals(),
                         notice=MOCK_NOTICE + " Las señales no proceden de ningún modelo.")
+
+    @app.get("/v1/model")
+    def model_status():
+        st = forecaster.status()
+        return {"installed": st.installed, "loaded": st.loaded, "model_id": st.model_id, "version": st.version,
+                "device": st.device, "detail": st.detail, "last_latency_ms": st.last_latency_ms,
+                "last_run": engine.last_run.isoformat() if engine and engine.last_run else None,
+                "watchlist": list(settings.watchlist)}
 
     @app.get("/v1/orders", response_model=Envelope[list[OrderRecord]])
     def list_orders(open_only: bool = False):

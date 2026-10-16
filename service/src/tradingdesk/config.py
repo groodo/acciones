@@ -9,6 +9,7 @@ SAFETY-02), así que no basta con editar la UI o un archivo.
 from __future__ import annotations
 
 import ipaddress
+import re
 import os
 import platform
 from dataclasses import dataclass
@@ -47,6 +48,13 @@ class Settings:
     # Envío de órdenes limitadas a la cuenta Paper (solo con data_source="ibkr").
     paper_orders: bool = True
     max_order_value: Decimal = Decimal("1000")
+    # Análisis con Kronos (solo con data_source="ibkr").
+    watchlist: tuple[str, ...] = ("AAPL", "MSFT", "NVDA", "KO", "SPY")
+    signal_interval_s: int = 300
+
+    @property
+    def kronos_dir(self) -> Path:
+        return self.data_dir / "kronos"
 
     @property
     def db_path(self) -> Path:
@@ -73,6 +81,10 @@ class Settings:
                               f"({IB_PAPER_GATEWAY_PORT} en IB Gateway o 7497 en TWS).")
         if not (Decimal("0") < self.max_order_value <= Decimal("100000")):
             raise ConfigError("TRADINGDESK_MAX_ORDER_VALUE debe estar entre 0 y 100000.")
+        if not (1 <= len(self.watchlist) <= 10) or not all(re.fullmatch(r"[A-Z.]{1,12}", s) for s in self.watchlist):
+            raise ConfigError("TRADINGDESK_WATCHLIST debe tener entre 1 y 10 símbolos, p. ej. AAPL,MSFT.")
+        if self.signal_interval_s < 60:
+            raise ConfigError("TRADINGDESK_SIGNAL_INTERVAL debe ser de al menos 60 segundos.")
         if not _is_loopback(self.ib_host):
             raise ConfigError(f"IB Gateway debe estar en este Mac; '{self.ib_host}' no es una dirección local.")
         if not _is_loopback(self.host):
@@ -102,6 +114,9 @@ class Settings:
             ib_client_id=number("TRADINGDESK_IB_CLIENT_ID", 17),
             paper_orders=env.get("TRADINGDESK_PAPER_ORDERS", "1").lower() not in ("0", "false", "no"),
             max_order_value=_decimal(env.get("TRADINGDESK_MAX_ORDER_VALUE", "1000")),
+            watchlist=tuple(s.strip().upper() for s in env.get("TRADINGDESK_WATCHLIST", "AAPL,MSFT,NVDA,KO,SPY")
+                            .split(",") if s.strip()),
+            signal_interval_s=number("TRADINGDESK_SIGNAL_INTERVAL", 300),
         ).validate()
 
 

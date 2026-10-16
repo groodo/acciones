@@ -80,3 +80,7 @@ Cada respuesta va envuelta en `{source, is_mock, mode, generated_at, notice, dat
 | POST | `/v1/orders/simulated` | Crea un borrador `DRAFT` simulado (idempotente por `client_order_id`) |
 | POST | `/v1/orders/{id}/cancel` | Cancela un borrador o pide a IBKR cancelar una orden Paper aceptada |
 | GET/POST | `/v1/kill-switch` | Consulta o activa «Detener operativa» |
+
+## Kronos-small (Hito C)
+
+Instalación y reglas de decisión en [docs/hito-c.md](docs/hito-c.md): `scripts/install_kronos.sh` y, con la fuente `ibkr`, las señales salen de Kronos ejecutado en local.

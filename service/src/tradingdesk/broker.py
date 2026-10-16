@@ -332,6 +332,31 @@ class IbkrPaperBroker:
             raise BrokerUnavailable("IBKR no tiene esa orden abierta.")
         self._call(run)
 
+    def historical_candles(self, symbol: str, bar_minutes: int, currency: str = "USD"):
+        """Velas OHLCV cerradas de la sesión regular (últimos 5 días) para Kronos. Solo lectura."""
+        from .forecast import Candle  # noqa: PLC0415
+
+        async def run(ib):
+            contract = await self._qualify(ib, symbol, currency)
+            bars = await ib.reqHistoricalDataAsync(
+                contract, endDateTime="", durationStr="5 D", barSizeSetting=f"{bar_minutes} mins",
+                whatToShow="TRADES", useRTH=True, formatDate=2)
+            candles = []
+            for b in bars or []:
+                ts = b.date if isinstance(b.date, datetime) else None
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                candles.append(Candle(ts=ts.astimezone(timezone.utc), open=float(b.open), high=float(b.high),
+                                      low=float(b.low), close=float(b.close), volume=float(max(b.volume, 0))))
+            return candles
+        candles = self._call(run, timeout=60)
+        return candles, self.snapshot().quotes
+
+    def current_positions(self) -> list[Position]:
+        return list(self.snapshot().positions)
+
     async def _qualify(self, ib, symbol: str, currency: str):
         from ib_async import Stock
 
